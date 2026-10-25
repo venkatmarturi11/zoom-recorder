@@ -1,0 +1,41 @@
+services:
+  # Zoom Telegram Recorder Worker & Controller
+  - type: web
+    name: zoom-telegram-recorder
+    runtime: docker
+    dockerfilePath: ./deployment/Dockerfile
+    plan: free # Note: Free tier limits RAM to 512MB and sleeps after 15m of inactivity
+    region: oregon # or frankfurt, ohio, singapore
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ALLOWED_TELEGRAM_USER_IDS
+        sync: false
+      - key: ADMIN_USER_IDS
+        sync: false
+      - key: STORAGE_PROVIDER
+        value: s3
+      - key: S3_ENDPOINT_URL
+        sync: false # Set to Cloudflare R2 endpoint: https://<account_id>.r2.cloudflarestorage.com
+      - key: S3_BUCKET_NAME
+        value: zoom-recordings
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: S3_REGION_NAME
+        value: auto
+      - key: APP_SECRET_KEY
+        generateValue: true
+      - key: MAX_CONCURRENT_JOBS
+        value: "1"
+      - key: CLEANUP_LOCAL_FILES_AFTER_UPLOAD
+        value: "true"
+      - key: BROWSER_HEADLESS
+        value: "false"
+      - key: CAPTURE_DRIVER
+        value: xvfb
+      - key: RECORDING_RESOLUTION
+        value: 1280x720
