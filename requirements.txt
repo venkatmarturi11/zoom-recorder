@@ -18,8 +18,9 @@ boto3>=1.34.0
 # Cryptographic Utilities (AES-256 Fernet Encryption)
 cryptography>=42.0.0
 
-# Asynchronous File I/O
+# Asynchronous File I/O & HTTP Keep-Alive Server
 aiofiles>=23.2.0
+aiohttp>=3.9.0
 
 # Testing Frameworks
 pytest>=8.0.0
