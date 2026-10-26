@@ -70,26 +70,30 @@ class ZoomMeetingIntegrator:
             raise
 
     async def _dismiss_cookie_dialogs(self) -> None:
-        """Dismiss common Zoom cookie/privacy dialogs."""
+        """Dismiss common Zoom cookie, privacy, and media permission dialogs."""
         cookie_selectors = [
             "#onetrust-accept-btn-handler",
             "button:has-text('Agree and Continue')",
             "button:has-text('Accept All Cookies')",
             "button:has-text('I Agree')",
+            ".pepc-permission-dialog__footer-button",
+            "[role='button']:has-text('Continue without')",
+            "button:has-text('Continue without')",
         ]
         for sel in cookie_selectors:
             try:
                 btn = self.page.locator(sel).first
                 if await btn.is_visible(timeout=1500):
                     await btn.click()
-                    logger.info("Dismissed cookie/consent dialog.")
-                    break
+                    logger.info("Dismissed dialog '%s'.", sel)
+                    await asyncio.sleep(0.5)
             except Exception:
                 continue
 
     async def _fill_participant_name(self, display_name: str) -> None:
         """Locate and enter the authorized bot participant display name."""
         name_selectors = [
+            "#input-for-name",
             "input#inputname",
             "input[name='inputname']",
             "input[placeholder*='name' i]",
@@ -109,6 +113,7 @@ class ZoomMeetingIntegrator:
     async def _fill_passcode(self, passcode: str) -> None:
         """Fill passcode input if rendered."""
         passcode_selectors = [
+            "#input-for-pwd",
             "input#inputpasscode",
             "input[name='inputpasscode']",
             "input[type='password']",
@@ -127,24 +132,29 @@ class ZoomMeetingIntegrator:
     async def _click_join_button(self) -> None:
         """Click the Join / Enter button on the pre-meeting web form."""
         join_btn_selectors = [
+            "button.preview-join-button",
             "button#joinBtn",
             "button:has-text('Join')",
-            "button.preview-join-button",
             "button[type='submit']",
         ]
         for sel in join_btn_selectors:
             try:
                 btn = self.page.locator(sel).first
                 if await btn.is_visible(timeout=2000):
-                    await btn.click()
+                    try:
+                        await btn.click(timeout=3000)
+                    except Exception:
+                        await btn.click(force=True)
                     logger.info("Clicked meeting join button.")
                     await asyncio.sleep(2.0)
+                    # Dismiss any follow-up mic/cam prompt if prompted
+                    await self._dismiss_cookie_dialogs()
                     return
             except Exception:
                 continue
 
     async def evaluate_meeting_state(self, max_wait_seconds: int = 30) -> JobState:
-        """Poll the page to determine current Zoom state.
+        """Poll the page to determine current Zoom state using visible text and active elements.
 
         Returns one of:
         - JobState.RECORDING
@@ -156,32 +166,49 @@ class ZoomMeetingIntegrator:
         step = 2
 
         while elapsed < max_wait_seconds:
-            content = await self.page.content()
-            lower_content = content.lower()
+            text_to_check = ""
+            if hasattr(self.page, "inner_text"):
+                try:
+                    res = await self.page.inner_text("body")
+                    if isinstance(res, str) and res.strip():
+                        text_to_check = res.lower()
+                except Exception:
+                    pass
 
-            # Check for Waiting Room
+            if not text_to_check and hasattr(self.page, "content"):
+                try:
+                    raw_content = await self.page.content()
+                    if isinstance(raw_content, str):
+                        import re
+                        clean_html = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", raw_content, flags=re.DOTALL | re.IGNORECASE)
+                        text_to_check = clean_html.lower()
+                except Exception:
+                    pass
+
+            # Check for Bot Protection / Sign-In / Registration Required
             if (
-                "please wait, the meeting host will let you in soon" in lower_content
-                or "waiting for the host to start this meeting" in lower_content
-                or "waiting room" in lower_content
+                "automated bots aren't allowed to join this meeting" in text_to_check
+                or "sign in to join" in text_to_check
+                or "this meeting requires registration" in text_to_check
+                or "only authorized attendees can join" in text_to_check
+                or "meeting registration" in text_to_check
+            ):
+                logger.info("State detected: WAITING_FOR_AUTHORIZATION (Sign-in or bot check required)")
+                return JobState.WAITING_FOR_AUTHORIZATION
+
+            # Check for Waiting Room in visible text
+            if (
+                "please wait, the meeting host will let you in soon" in text_to_check
+                or "waiting for the host to start this meeting" in text_to_check
+                or "the meeting host will let you in soon" in text_to_check
             ):
                 logger.info("State detected: WAITING_FOR_HOST")
                 return JobState.WAITING_FOR_HOST
 
-            # Check for Registration / Sign-In / MFA Required
-            if (
-                "sign in to join" in lower_content
-                or "meeting registration" in lower_content
-                or "this meeting requires registration" in lower_content
-                or "only authorized attendees can join" in lower_content
-            ):
-                logger.info("State detected: WAITING_FOR_AUTHORIZATION")
-                return JobState.WAITING_FOR_AUTHORIZATION
-
             # Check for Meeting Ended notice
             if (
-                "this meeting has been ended by the host" in lower_content
-                or "the meeting has ended" in lower_content
+                "this meeting has been ended by the host" in text_to_check
+                or "the meeting has ended" in text_to_check
             ):
                 logger.info("Meeting has ended.")
                 return JobState.COMPLETED

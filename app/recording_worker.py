@@ -79,6 +79,10 @@ class RecordingWorker:
                 )
                 # Wait up to 10 minutes in waiting room before timing out
                 admitted = await self._wait_for_host_admittance(zoom, max_wait_seconds=600)
+                if self._stop_event.is_set():
+                    logger.info("Job %s stopped by user before host admission.", self.job.job_id)
+                    await self._update_state(JobState.CANCELLED, "Recording stopped by user before host admission.")
+                    return
                 if not admitted:
                     raise TimeoutError("Host did not admit the recording assistant within 10 minutes.")
 

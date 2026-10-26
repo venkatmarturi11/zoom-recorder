@@ -89,6 +89,12 @@ class BrowserManager:
             self._context = await self._browser.new_context(**context_kwargs)
             self._page = await self._context.new_page()
 
+            # Mask automation attributes to prevent false bot detection
+            await self._page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                window.navigator.chrome = { runtime: {} };
+            """)
+
             # Listen for unexpected page or browser crash
             self._page.on("crash", self._handle_crash)
             self._page.on("close", self._handle_close)
