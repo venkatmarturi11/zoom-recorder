@@ -69,7 +69,7 @@ def validate_and_parse_zoom_url(url_str: str) -> Tuple[str, str, Optional[str]]:
     if not url_str or not isinstance(url_str, str):
         raise InvalidZoomURLError("Empty or non-string Zoom URL provided.")
 
-    trimmed = url_str.strip()
+    trimmed = url_str.strip().strip("<>\"'").strip()
     if not (trimmed.startswith("http://") or trimmed.startswith("https://")):
         trimmed = "https://" + trimmed
 

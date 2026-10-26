@@ -1,6 +1,7 @@
 """Telegram bot command handlers and interactive callback query logic."""
 
 import logging
+import re
 from typing import Optional
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -510,3 +511,66 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await cmd_health(update, context)
     elif data == "cmd_setname":
         await cmd_setname(update, context)
+
+
+@authorized_telegram_user_only
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle plain text messages from Telegram users.
+
+    - Automatically detects pasted Zoom URLs and initiates recording (/join).
+    - If plain text or greeting is sent, replies with an interactive dashboard/guide.
+    """
+    if not update.effective_message or not update.effective_message.text:
+        return
+
+    text = update.effective_message.text.strip()
+
+    # Search for Zoom URL in message
+    zoom_match = re.search(r"https?://[^\s]*zoom(?:gov)?\.(?:us|com)/[^\s]+", text, re.IGNORECASE)
+    if not zoom_match:
+        # Check without https://
+        zoom_match = re.search(r"(?:[a-zA-Z0-9-]+\.)?zoom(?:gov)?\.(?:us|com)/[^\s]+", text, re.IGNORECASE)
+
+    if zoom_match:
+        raw_url = zoom_match.group(0).rstrip(".,;!>")
+        # Pass to cmd_join via context.args
+        context.args = [raw_url]
+        await cmd_join(update, context)
+        return
+
+    # Regular conversational message / greeting
+    user = update.effective_user
+    db_user = await get_or_create_user(telegram_id=user.id)
+    settings = get_settings()
+    active_bot_name = db_user.custom_display_name or settings.bot_display_name
+
+    reply = (
+        f"👋 *Hi {user.first_name}!*\n\n"
+        "To start recording, simply *send or paste a Zoom meeting link* here!\n\n"
+        f"🏷️ *Bot Participant Name:* `{active_bot_name}`\n\n"
+        "🚀 *Commands & Quick Controls:*\n"
+        "• Paste any Zoom link or use `/join <link>`\n"
+        "• `/status` - Check current recording status\n"
+        "• `/stop` - Stop active recording & upload MP4\n"
+        "• `/setname <name>` - Change your bot's name in meetings\n"
+        "• `/recordings` - View past recordings & download links\n"
+        "• `/help` - View complete help guide"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("📊 Status", callback_data="cmd_status"),
+            InlineKeyboardButton("📁 My Recordings", callback_data="cmd_recordings"),
+        ],
+        [
+            InlineKeyboardButton("🏷️ Set Bot Name", callback_data="cmd_setname"),
+            InlineKeyboardButton("ℹ️ Help", callback_data="cmd_help"),
+        ],
+    ]
+
+    await update.effective_message.reply_text(
+        text=reply,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+

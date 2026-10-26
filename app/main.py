@@ -51,6 +51,8 @@ async def main() -> None:
             logger.info("Running in local standby mode (no bot token provided). Database initialized.")
     except (KeyboardInterrupt, SystemExit):
         logger.info("Keyboard interrupt received.")
+    except Exception as exc:
+        logger.critical("Fatal application error in main event loop: %s", exc, exc_info=True)
     finally:
         await bot_app.stop()
         logger.info("Application shut down successfully.")

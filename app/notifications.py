@@ -80,7 +80,16 @@ class NotificationService:
                 reply_markup=keyboard,
             )
         except Exception as exc:
-            logger.error("Failed to send notification to chat %d: %s", chat_id, exc)
+            logger.warning("Markdown send failed for chat %d: %s; retrying as plain text", chat_id, exc)
+            try:
+                plain_text = text.replace("*", "").replace("`", "").replace("_", "")
+                await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=plain_text,
+                    reply_markup=keyboard,
+                )
+            except Exception as final_exc:
+                logger.error("Failed to send notification to chat %d: %s", chat_id, final_exc)
 
     async def notify_recording_completed(
         self,

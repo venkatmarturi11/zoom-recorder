@@ -15,6 +15,7 @@ from app.commands import (
     cmd_status,
     cmd_stop,
     handle_callback_query,
+    handle_message,
     set_job_manager,
 )
 from app.database import create_recording_job, create_recording_metadata, get_or_create_user
@@ -201,3 +202,33 @@ async def test_cmd_health(mock_telegram_update, mock_job_manager):
     args, _ = update.effective_message.reply_text.call_args
     assert "System Health Report" in args[0]
     assert "ONLINE" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_handle_message_plain_text(mock_telegram_update):
+    """Verify plain text greeting returns dashboard and command guide."""
+    update, context = mock_telegram_update(user_id=1001, text="hello bot")
+    await handle_message(update, context)
+    update.effective_message.reply_text.assert_called_once()
+    reply = _extract_reply_text(update.effective_message.reply_text.call_args)
+    assert "Hi Test!" in reply
+    assert "paste a Zoom meeting link" in reply
+
+
+@pytest.mark.asyncio
+async def test_handle_message_raw_zoom_link(mock_telegram_update, mock_job_manager):
+    """Verify pasting a raw Zoom link directly triggers meeting join."""
+    raw_link = "https://us02web.zoom.us/j/1234567890?pwd=secretpassword"
+    update, context = mock_telegram_update(user_id=1001, text=raw_link)
+    
+    mock_job = MagicMock()
+    mock_job.job_id = "JOB-TEST-AUTO"
+    mock_job.display_name = "Cloud Recorder Bot"
+    mock_job_manager.create_and_start_job.return_value = mock_job
+
+    await handle_message(update, context)
+    update.effective_message.reply_text.assert_called_once()
+    reply = _extract_reply_text(update.effective_message.reply_text.call_args)
+    assert "Recording request received" in reply
+    assert "JOB-TEST-AUTO" in reply
+

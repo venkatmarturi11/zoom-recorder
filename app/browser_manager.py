@@ -48,6 +48,9 @@ class BrowserManager:
             self._playwright = await async_playwright().start()
 
             # Launch arguments for reliable media rendering and container compatibility
+            # NOTE: --use-fake-ui-for-media-stream and --use-fake-device-for-media-stream
+            # are intentionally EXCLUDED because Zoom detects them as bot indicators.
+            # Media permissions are handled via the pepc dialog dismissal in zoom_integration.
             launch_args = [
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
@@ -56,8 +59,6 @@ class BrowserManager:
                 "--no-first-run",
                 "--no-zygote",
                 "--disable-gpu",
-                "--use-fake-ui-for-media-stream",  # Auto-grants camera/mic prompts
-                "--use-fake-device-for-media-stream",
                 "--autoplay-policy=no-user-gesture-required",  # Auto-plays audio without clicking
                 "--window-size=1280,720",
                 "--disable-infobars",
@@ -72,6 +73,9 @@ class BrowserManager:
             )
 
             # Setup isolated browser context
+            # NOTE: permissions=["microphone", "camera"] is intentionally EXCLUDED
+            # because Playwright's permission grant triggers Zoom's bot detection.
+            # Media permission dialogs are handled via JS in zoom_integration instead.
             context_kwargs = {
                 "viewport": {"width": width, "height": height},
                 "user_agent": (
@@ -79,7 +83,6 @@ class BrowserManager:
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/124.0.0.0 Safari/537.36"
                 ),
-                "permissions": ["microphone", "camera"],
             }
 
             if storage_state:
@@ -87,13 +90,26 @@ class BrowserManager:
                 logger.info("Injected saved authenticated session state into browser context.")
 
             self._context = await self._browser.new_context(**context_kwargs)
-            self._page = await self._context.new_page()
 
-            # Mask automation attributes to prevent false bot detection
-            await self._page.add_init_script("""
+            # Mask automation attributes to prevent bot detection.
+            # Applied at the context level so it runs before any page scripts.
+            await self._context.add_init_script("""
+                // Hide webdriver property
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                window.navigator.chrome = { runtime: {} };
+                // Add Chrome runtime object
+                window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
+                // Override permissions query to avoid detection
+                if (window.navigator && window.navigator.permissions) {
+                    const originalQuery = window.navigator.permissions.query;
+                    window.navigator.permissions.query = (parameters) => (
+                        parameters.name === 'notifications'
+                            ? Promise.resolve({ state: Notification.permission })
+                            : originalQuery(parameters)
+                    );
+                }
             """)
+
+            self._page = await self._context.new_page()
 
             # Listen for unexpected page or browser crash
             self._page.on("crash", self._handle_crash)

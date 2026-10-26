@@ -7,6 +7,8 @@ from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
+    MessageHandler,
+    filters,
 )
 
 from app.commands import (
@@ -21,6 +23,7 @@ from app.commands import (
     cmd_status,
     cmd_stop,
     handle_callback_query,
+    handle_message,
     set_job_manager,
 )
 from app.config import get_settings
@@ -87,6 +90,7 @@ class TelegramBotApp:
             CommandHandler("download", cmd_download),
             CommandHandler("health", cmd_health),
             CallbackQueryHandler(handle_callback_query),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message),
         ]
 
         for handler in handlers:
