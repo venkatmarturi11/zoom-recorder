@@ -119,26 +119,40 @@ class JobManager:
             return False, f"Job {job.job_id} has already concluded (Current status: {job.status.value})."
 
         worker = self._active_workers.get(job_id)
-        if worker:
-            worker.request_stop()
-            if job.status == JobState.RECORDING:
-                return True, "Stop signal received. Packaging and uploading MP4..."
-            else:
-                return True, f"Session stopped while in state '{job.status.value}'."
+        task = self._worker_tasks.get(job_id)
 
-        if job.status == JobState.RECORDING:
-            await db.update_job_status(job_id, JobState.STOPPING, "Stop signal received.")
-            return True, "Recording stopping. Finalizing media..."
-
-        if job.status in (JobState.STARTING_BROWSER, JobState.JOINING_MEETING, JobState.WAITING_FOR_HOST, JobState.QUEUED):
+        # Pre-recording states: cancel immediately, close browser, and release active job lock
+        pre_recording_states = (
+            JobState.STARTING_BROWSER,
+            JobState.JOINING_MEETING,
+            JobState.WAITING_FOR_HOST,
+            JobState.WAITING_FOR_AUTHORIZATION,
+            JobState.QUEUED,
+        )
+        if job.status in pre_recording_states:
             await db.update_job_status(job_id, JobState.CANCELLED, "Stopped by user before recording.")
-            task = self._worker_tasks.get(job_id)
+            if worker:
+                worker.request_stop()
             if task and not task.done():
                 task.cancel()
             self._active_workers.pop(job_id, None)
-            return True, "Meeting session stopped and cancelled by user."
+            self._worker_tasks.pop(job_id, None)
+            return True, "Session stopped and cancelled."
 
-        return False, f"Job has already concluded (Current status: {job.status.value})."
+        # Active recording states: signal worker to finalize MP4 and upload
+        if job.status in (JobState.RECORDING, JobState.PREPARING_CAPTURE):
+            await db.update_job_status(job_id, JobState.STOPPING, "Stop signal received.")
+            if worker:
+                worker.request_stop()
+            return True, "Stop signal received. Packaging and uploading MP4..."
+
+        if job.status == JobState.STOPPING:
+            return True, "Recording is already stopping. Finalizing media..."
+
+        # Stray worker cleanup if already finished
+        self._active_workers.pop(job_id, None)
+        self._worker_tasks.pop(job_id, None)
+        return False, f"Job has already concluded ({job.status.value})."
 
     async def cancel_job(self, job_id: str, user_id: int) -> Tuple[bool, str]:
         """Cancel a queued job that has not yet started recording."""

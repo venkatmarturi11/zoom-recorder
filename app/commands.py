@@ -503,7 +503,7 @@ async def cmd_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
     except ValueError as val_err:
-        await update.effective_message.reply_text(f"⚠️ *Notice:* {str(val_err)}", parse_mode="Markdown")
+        await update.effective_message.reply_text(f"⚠️ Notice: {str(val_err)}")
     except Exception as exc:
         logger.error("Failed to start recording job: %s", exc, exc_info=True)
         await update.effective_message.reply_text(
@@ -590,15 +590,16 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         success = bool(res)
         msg = "Packaging and uploading MP4... You will receive the download link shortly." if success else "Job is not actively recording or already stopped."
 
+    clean_msg = msg.replace("_", " ")
     if success:
         await update.effective_message.reply_text(
             f"⏹️ *Stop Signal Sent*\n\n"
             f"Finalizing session for `{target_job.job_id}`.\n"
-            f"{msg}",
+            f"{clean_msg}",
             parse_mode="Markdown",
         )
     else:
-        await update.effective_message.reply_text(f"⚠️ {msg}")
+        await update.effective_message.reply_text(f"⚠️ {clean_msg}")
 
 
 @authorized_telegram_user_only
@@ -730,7 +731,10 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle inline button callbacks (stop, status, cancel, download)."""
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
 
     data = query.data
     tg_user = update.effective_user
@@ -746,11 +750,16 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 success = bool(res)
                 msg = "Finalizing media." if success else "Could not stop recording."
 
-            if success:
+            try:
                 await query.edit_message_reply_markup(reply_markup=None)
-                await query.message.reply_text(f"⏹️ Stopping `{job_id}`: {msg}")
+            except Exception:
+                pass
+
+            clean_msg = msg.replace("_", " ")
+            if success:
+                await query.message.reply_text(f"⏹️ Stopping `{job_id}`: {clean_msg}")
             else:
-                await query.message.reply_text(f"ℹ️ {msg}")
+                await query.message.reply_text(f"ℹ️ {clean_msg}")
 
     elif data.startswith("status_"):
         job_id = data.replace("status_", "")
