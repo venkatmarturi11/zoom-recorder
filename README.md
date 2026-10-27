@@ -102,7 +102,9 @@ project/
 │   └── entrypoint.sh          # Container initialization (DBus, PulseAudio sink, Xvfb)
 ├── scripts/
 │   ├── setup.sh               # One-click environment bootstrap script
-│   └── healthcheck.py         # Container health probe checking DB, storage, and FFmpeg
+│   ├── healthcheck.py         # Container health probe checking DB, storage, and FFmpeg
+│   ├── attend_meeting.py      # Standalone runner: attends Zoom meetings at any cost
+│   └── record_tab.py          # Standalone runner: records browser tab into MP4
 ├── docs/
 │   ├── MOBILE_SETUP_GUIDE.md  # Step-by-step setup using only an Android phone
 │   ├── FREE_TIER_LIMITATIONS.md# In-depth technical report on free cloud constraints
@@ -163,9 +165,33 @@ The recording subsystem tracks every job through 14 explicit states:
 
 ---
 
+## 🛠️ Standalone Tools (Independent Execution)
+
+The project is structured into standalone components that can run independently or be orchestrated together by the Telegram bot:
+
+### 1. Standalone Meeting Attendee (`scripts/attend_meeting.py`)
+Attends any Zoom meeting "at any cost" with anti-bot stealth, automatic form filling, cookie/modal dismissals, waiting room handling, and audio connection:
+```bash
+python scripts/attend_meeting.py --url "https://zoom.us/j/123456789" --name "My Bot" --passcode "123" --duration 3600
+```
+
+### 2. Standalone Tab Recorder (`scripts/record_tab.py`)
+Records any browser tab or web page cleanly into high-quality MP4:
+```bash
+python scripts/record_tab.py --url "https://zoom.us/test" --duration 30 --output recordings/tab_sample.mp4
+```
+
+### 3. Main Project Orchestrator (`app/main.py`)
+Uses both the Attendee and Tab Recorder seamlessly, providing the full Telegram bot interface:
+```bash
+python -m app.main
+```
+
+---
+
 ## 🧪 Automated Testing
 
-All **41 test cases** across **9 test suites** pass successfully:
+All **46 test cases** across **10 test suites** pass successfully:
 
 ```bash
 pytest -v

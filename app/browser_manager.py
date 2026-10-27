@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Any, Dict, Optional
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
@@ -38,19 +39,20 @@ class BrowserManager:
     def context(self) -> Optional[BrowserContext]:
         return self._context
 
-    async def launch_browser(self, storage_state: Optional[Dict[str, Any]] = None) -> Page:
+    async def launch_browser(
+        self,
+        storage_state: Optional[Dict[str, Any]] = None,
+        record_video_dir: Optional[Path] = None,
+    ) -> Page:
         """Launch Chromium with authorized audio/video permissions and standard viewport."""
         if self._is_running and self._page:
             return self._page
 
-        logger.info("Starting Playwright Chromium instance...")
+        logger.info("Starting Playwright Chromium instance with stealth anti-detection...")
         try:
             self._playwright = await async_playwright().start()
 
-            # Launch arguments for reliable media rendering and container compatibility
-            # NOTE: --use-fake-ui-for-media-stream and --use-fake-device-for-media-stream
-            # are intentionally EXCLUDED because Zoom detects them as bot indicators.
-            # Media permissions are handled via the pepc dialog dismissal in zoom_integration.
+            # Launch arguments for stealth and media compatibility
             launch_args = [
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
@@ -63,6 +65,7 @@ class BrowserManager:
                 "--window-size=1280,720",
                 "--disable-infobars",
                 "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process",
             ]
 
             width, height = self.settings.resolution_tuple
@@ -70,20 +73,26 @@ class BrowserManager:
             self._browser = await self._playwright.chromium.launch(
                 headless=self.settings.browser_headless,
                 args=launch_args,
+                ignore_default_args=["--enable-automation"],
             )
 
             # Setup isolated browser context
-            # NOTE: permissions=["microphone", "camera"] is intentionally EXCLUDED
-            # because Playwright's permission grant triggers Zoom's bot detection.
-            # Media permission dialogs are handled via JS in zoom_integration instead.
-            context_kwargs = {
+            context_kwargs: Dict[str, Any] = {
                 "viewport": {"width": width, "height": height},
                 "user_agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/124.0.0.0 Safari/537.36"
                 ),
+                "locale": "en-US",
+                "timezone_id": "America/New_York",
             }
+
+            if record_video_dir:
+                record_video_dir.mkdir(parents=True, exist_ok=True)
+                context_kwargs["record_video_dir"] = str(record_video_dir)
+                context_kwargs["record_video_size"] = {"width": width, "height": height}
+                logger.info("Enabled native Playwright tab video recording into %s", record_video_dir)
 
             if storage_state:
                 context_kwargs["storage_state"] = storage_state
@@ -91,22 +100,56 @@ class BrowserManager:
 
             self._context = await self._browser.new_context(**context_kwargs)
 
-            # Mask automation attributes to prevent bot detection.
-            # Applied at the context level so it runs before any page scripts.
+            # Mask automation attributes and emulate real browser environment
             await self._context.add_init_script("""
                 // Hide webdriver property
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                // Add Chrome runtime object
-                window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
-                // Override permissions query to avoid detection
+                
+                // Add real Chrome runtime and app objects
+                window.chrome = {
+                    runtime: {
+                        OnInstalledReason: { INSTALL: 'install', UPDATE: 'update', CHROME_UPDATE: 'chrome_update', SHARED_MODULE_UPDATE: 'shared_module_update' },
+                        OnRestartRequiredReason: { APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' },
+                        PlatformArch: { ARM: 'arm', ARM64: 'arm64', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
+                        PlatformNaclArch: { ARM: 'arm', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
+                        PlatformOs: { ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win' },
+                    },
+                    app: { isInstalled: false },
+                    loadTimes: function() {},
+                    csi: function() {}
+                };
+
+                // Languages
+                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+
+                // Plugins mock
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [
+                        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+                        { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
+                    ]
+                });
+
+                // Permissions query override
                 if (window.navigator && window.navigator.permissions) {
                     const originalQuery = window.navigator.permissions.query;
                     window.navigator.permissions.query = (parameters) => (
                         parameters.name === 'notifications'
                             ? Promise.resolve({ state: Notification.permission })
-                            : originalQuery(parameters)
+                            : originalQuery ? originalQuery(parameters) : Promise.resolve({ state: 'prompt' })
                     );
                 }
+
+                // WebGL vendor/renderer spoofing (prevents headless WebGL fingerprinting)
+                try {
+                    const getParameter = WebGLRenderingContext.prototype.getParameter;
+                    WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                        if (parameter === 37445) return 'Intel Inc.';
+                        if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+                        return getParameter.apply(this, [parameter]);
+                    };
+                } catch (e) {}
             """)
 
             self._page = await self._context.new_page()

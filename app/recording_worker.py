@@ -69,7 +69,13 @@ class RecordingWorker:
                 join_url=self.job.zoom_url,
                 display_name=self.job.display_name,
                 passcode=self.job.passcode,
+                stop_event=self._stop_event,
             )
+
+            if self._stop_event.is_set() or detected_state == JobState.CANCELLED:
+                logger.info("Job %s stopped by user during meeting join.", self.job.job_id)
+                await self._update_state(JobState.CANCELLED, "Meeting session cancelled by user.")
+                return
 
             # Handle Waiting Room or Authorization Required
             if detected_state == JobState.WAITING_FOR_HOST:
@@ -126,6 +132,9 @@ class RecordingWorker:
                 if await zoom.check_meeting_ended():
                     logger.info("Zoom meeting ended by host.")
                     break
+
+                # Keep session active and auto-dismiss any late disclaimers
+                await zoom.keep_alive_poll()
 
             # 5. State: STOPPING
             await self._update_state(JobState.STOPPING, "Finalizing and packaging media streams...")

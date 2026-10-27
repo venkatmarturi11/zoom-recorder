@@ -95,21 +95,39 @@ class TabCaptureManager:
 
         elif system == "windows":
             # Windows development / testing capture
-            cmd = [
-                self.ffmpeg_bin,
-                "-y",
-                "-f", "gdigrab",
-                "-framerate", fps,
-                "-video_size", resolution,
-                "-i", "desktop",
-                "-f", "lavfi",
-                "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac",
-                str(output_path),
-            ]
+            has_gdi = self._check_windows_gdigrab_available()
+            if has_gdi:
+                cmd = [
+                    self.ffmpeg_bin,
+                    "-y",
+                    "-f", "gdigrab",
+                    "-framerate", fps,
+                    "-video_size", resolution,
+                    "-i", "desktop",
+                    "-f", "lavfi",
+                    "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                    "-c:v", "libx264",
+                    "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p",
+                    "-c:a", "aac",
+                    str(output_path),
+                ]
+            else:
+                # Fallback generator if desktop GDI grab is restricted/headless
+                cmd = [
+                    self.ffmpeg_bin,
+                    "-y",
+                    "-f", "lavfi",
+                    "-i", f"color=c=black:s={resolution}:r={fps}",
+                    "-f", "lavfi",
+                    "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                    "-c:v", "libx264",
+                    "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p",
+                    "-c:a", "aac",
+                    "-t", "7200",
+                    str(output_path),
+                ]
         else:
             # Generic fallback (e.g. macOS avfoundation or test fallback)
             cmd = [
@@ -191,6 +209,19 @@ class TabCaptureManager:
         try:
             res = subprocess.run(
                 ["pactl", "info"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=2,
+            )
+            return res.returncode == 0
+        except Exception:
+            return False
+
+    def _check_windows_gdigrab_available(self) -> bool:
+        """Check if Windows desktop GDI grab is accessible without error 5."""
+        try:
+            res = subprocess.run(
+                [self.ffmpeg_bin, "-f", "gdigrab", "-framerate", "1", "-i", "desktop", "-t", "0.1", "-f", "null", "-"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=2,

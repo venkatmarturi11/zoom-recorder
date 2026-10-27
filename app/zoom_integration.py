@@ -1,17 +1,19 @@
-"""Zoom Web Client automation, state detection, and authorized meeting joining."""
+"""Zoom Web Client automation, state detection, anti-bot evasion, and authorized meeting joining."""
 
 import asyncio
 import logging
+import re
 from typing import Optional, Tuple
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
+from app.browser_manager import BrowserManager
 from app.models import JobState
 
 logger = logging.getLogger("zoom_recorder.zoom")
 
 
 class ZoomNavigationError(Exception):
-    """Raised when navigation to the Zoom meeting fails."""
+    """Raised when navigation to the Zoom meeting fails or meeting link is invalid."""
     pass
 
 
@@ -21,7 +23,7 @@ class ZoomAccessError(Exception):
 
 
 class ZoomMeetingIntegrator:
-    """Manages Zoom Web Client UI interactions and meeting state transitions."""
+    """Manages Zoom Web Client UI interactions, form filling, and meeting state transitions."""
 
     def __init__(self, page: Page):
         self.page = page
@@ -32,6 +34,7 @@ class ZoomMeetingIntegrator:
         display_name: str,
         passcode: Optional[str] = None,
         timeout_ms: int = 45000,
+        stop_event: Optional[asyncio.Event] = None,
     ) -> JobState:
         """Navigate to Zoom Web Client, input participant name, and detect initial meeting state.
 
@@ -39,36 +42,56 @@ class ZoomMeetingIntegrator:
         - JobState.RECORDING (if directly in meeting)
         - JobState.WAITING_FOR_HOST (if in waiting room)
         - JobState.WAITING_FOR_AUTHORIZATION (if registration or login required)
+        - JobState.PREPARING_CAPTURE (if meeting toolbar detected)
         """
         logger.info("Navigating to Zoom meeting URL: %s", join_url.split("?")[0])
 
-        try:
-            await self.page.goto(join_url, timeout=timeout_ms, wait_until="domcontentloaded")
-            await asyncio.sleep(3.0)  # Allow initial scripts to bootstrap
+        if stop_event and stop_event.is_set():
+            return JobState.CANCELLED
 
-            # 0. Check for immediate errors (invalid link, meeting ended, etc.)
+        try:
+            # 1. Navigate to Zoom meeting URL
+            await self.page.goto(join_url, timeout=timeout_ms, wait_until="domcontentloaded")
+            await asyncio.sleep(2.5)  # Allow initial scripts to bootstrap
+
+            if stop_event and stop_event.is_set():
+                return JobState.CANCELLED
+
+            # 2. Check if we landed on the desktop app launcher page and click "Join from Your Browser"
+            await self._handle_browser_launcher_page()
+
+            # 3. Check for immediate errors (invalid link, meeting ended, etc.)
             early_state = await self._check_immediate_errors()
             if early_state is not None:
                 return early_state
 
-            # 1. Dismiss any Cookie Consent or Privacy banners
+            # 4. Dismiss any Cookie Consent or Privacy banners
             await self._dismiss_cookie_dialogs()
 
-            # 2. Dismiss Zoom's media permission dialog (pepc)
+            # 5. Dismiss Zoom's media permission dialog (pepc)
             await self._dismiss_media_permission_dialog()
 
-            # 3. Input Participant Name if name input field is visible
+            if stop_event and stop_event.is_set():
+                return JobState.CANCELLED
+
+            # 6. Input Participant Name if name input field is visible
             await self._fill_participant_name(display_name)
 
-            # 4. Input Passcode if passcode field is prompted
+            # 7. Input Passcode if passcode field is prompted
             if passcode:
                 await self._fill_passcode(passcode)
 
-            # 5. Click the 'Join' button
+            # 8. Accept any Terms of Service / Privacy checkboxes if present
+            await self._handle_terms_checkbox()
+
+            if stop_event and stop_event.is_set():
+                return JobState.CANCELLED
+
+            # 9. Click the 'Join' button
             await self._click_join_button()
 
-            # 6. Evaluate landing state
-            return await self.evaluate_meeting_state(max_wait_seconds=30)
+            # 10. Evaluate landing state
+            return await self.evaluate_meeting_state(max_wait_seconds=30, stop_event=stop_event)
 
         except PlaywrightTimeoutError as exc:
             logger.error("Navigation timeout while joining Zoom meeting: %s", exc)
@@ -76,6 +99,51 @@ class ZoomMeetingIntegrator:
         except Exception as exc:
             logger.error("Unexpected error joining Zoom meeting: %s", exc)
             raise
+
+    async def _handle_browser_launcher_page(self) -> bool:
+        """If on the Zoom app launch page, find and click 'Join from Your Browser'."""
+        try:
+            # Check for direct 'Join from Your Browser' link
+            browser_links = [
+                "a:has-text('Join from Your Browser')",
+                "a:has-text('join from your browser')",
+                ".web-client-click",
+                "a[href*='/wc/']",
+                "#wc_default",
+            ]
+            for sel in browser_links:
+                try:
+                    link = self.page.locator(sel).first
+                    if await link.is_visible(timeout=1000):
+                        await link.click()
+                        logger.info("Clicked 'Join from Your Browser' link (%s).", sel)
+                        await asyncio.sleep(2.0)
+                        return True
+                except Exception:
+                    continue
+
+            # Often Zoom shows 'Launch Meeting' first; clicking or waiting triggers the web client link
+            launch_btns = ["button:has-text('Launch Meeting')", "a:has-text('Launch Meeting')", "#zoom-ui-frame button"]
+            for sel in launch_btns:
+                try:
+                    btn = self.page.locator(sel).first
+                    if await btn.is_visible(timeout=1000):
+                        await btn.click()
+                        await asyncio.sleep(1.5)
+                        # Check again for browser link after clicking launch
+                        for b_sel in browser_links:
+                            b_link = self.page.locator(b_sel).first
+                            if await b_link.is_visible(timeout=1500):
+                                await b_link.click()
+                                logger.info("Clicked 'Join from Your Browser' after Launch Meeting prompt.")
+                                await asyncio.sleep(2.0)
+                                return True
+                except Exception:
+                    continue
+        except Exception as exc:
+            logger.debug("Non-fatal check on launcher page: %s", exc)
+
+        return False
 
     async def _check_immediate_errors(self) -> Optional[JobState]:
         """Check for immediate error states like invalid meeting links."""
@@ -88,7 +156,7 @@ class ZoomMeetingIntegrator:
                 pass
 
             # Check for invalid/expired meeting link
-            if "error" in title.lower() or "this meeting link is invalid" in text:
+            if "this meeting link is invalid" in text or "meeting does not exist" in text or "error (3,001)" in text:
                 logger.error("Meeting link is invalid or expired. Page title: %s", title)
                 raise ZoomNavigationError(
                     "This Zoom meeting link is invalid or has expired (error 3,001). "
@@ -101,7 +169,7 @@ class ZoomMeetingIntegrator:
                 return JobState.WAITING_FOR_HOST
 
         except ZoomNavigationError:
-            raise  # Re-raise navigation errors
+            raise
         except Exception as exc:
             logger.debug("Error during immediate error check (non-fatal): %s", exc)
 
@@ -113,15 +181,18 @@ class ZoomMeetingIntegrator:
             "#onetrust-accept-btn-handler",
             "button:has-text('Agree and Continue')",
             "button:has-text('Accept All Cookies')",
+            "button:has-text('Accept All')",
             "button:has-text('I Agree')",
+            "#cookie-dialog button",
+            ".ot-sdk-button",
         ]
         for sel in cookie_selectors:
             try:
                 btn = self.page.locator(sel).first
-                if await btn.is_visible(timeout=1000):
+                if await btn.is_visible(timeout=800):
                     await btn.click()
                     logger.info("Dismissed cookie dialog '%s'.", sel)
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.3)
             except Exception:
                 continue
 
@@ -129,19 +200,15 @@ class ZoomMeetingIntegrator:
         """Dismiss Zoom's media permission (pepc) dialog via JavaScript.
 
         This dialog asks "Do you want people to hear you in the meeting?" with a
-        "Continue without microphone and camera" button. Since we don't use
-        --use-fake-ui-for-media-stream (which triggers bot detection), we must
-        dismiss this dialog programmatically.
+        "Continue without microphone and camera" button.
         """
         try:
             result = await self.page.evaluate("""() => {
-                // Try the specific pepc button first
                 const pepcBtn = document.querySelector('.pepc-permission-dialog__footer-button');
                 if (pepcBtn) {
                     pepcBtn.click();
                     return 'dismissed_pepc';
                 }
-                // Try text-based fallback
                 const buttons = Array.from(document.querySelectorAll('button'));
                 const continueBtn = buttons.find(b =>
                     b.textContent.toLowerCase().includes('continue without')
@@ -154,7 +221,7 @@ class ZoomMeetingIntegrator:
             }""")
             if result != 'no_dialog':
                 logger.info("Dismissed media permission dialog: %s", result)
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.8)
 
                 # Remove any lingering ReactModal overlay that blocks clicks
                 await self.page.evaluate("""() => {
@@ -163,57 +230,109 @@ class ZoomMeetingIntegrator:
                     );
                     overlays.forEach(el => el.remove());
                 }""")
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
         except Exception as exc:
             logger.debug("Media permission dialog dismissal (non-critical): %s", exc)
+
+    async def _dismiss_recording_disclaimer(self) -> None:
+        """Dismiss Zoom's 'This meeting is being recorded' or consent modal."""
+        selectors = [
+            "button:has-text('Got it')",
+            "button:has-text('Got It')",
+            "button:has-text('Stay in Meeting')",
+            "button:has-text('Agree')",
+            "button:has-text('Accept')",
+            ".recording-disclaimer-btn",
+            ".zm-modal button:has-text('Got it')",
+        ]
+        for sel in selectors:
+            try:
+                btn = self.page.locator(sel).first
+                if await btn.is_visible(timeout=800):
+                    await btn.click()
+                    logger.info("Dismissed recording disclaimer modal via '%s'.", sel)
+                    await asyncio.sleep(0.5)
+                    return
+            except Exception:
+                continue
+
+    async def _handle_terms_checkbox(self) -> None:
+        """Automatically check any required Terms of Service or Privacy Policy checkboxes."""
+        try:
+            await self.page.evaluate("""() => {
+                const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+                checkboxes.forEach(cb => {
+                    if (!cb.checked && cb.offsetParent !== null) {
+                        cb.click();
+                    }
+                });
+            }""")
+        except Exception:
+            pass
 
     async def _fill_participant_name(self, display_name: str) -> None:
         """Locate and enter the authorized bot participant display name.
 
-        Uses JavaScript to set the value on React-controlled inputs to ensure
-        the internal React state is updated, not just the DOM value.
+        Uses Playwright fill (dispatches keyboard events) and JS native descriptor
+        setter to guarantee internal React state synchronization.
         """
+        selectors = [
+            "#input-for-name",
+            "input#inputname",
+            "input[name='inputname']",
+            "input[placeholder*='name' i]",
+            "input[aria-label*='Your Name' i]",
+            "input[aria-label*='name' i]",
+            ".preview-join-name-input input",
+            "#name-input",
+        ]
+
+        # 1. Playwright fill
+        for sel in selectors:
+            try:
+                field = self.page.locator(sel).first
+                if await field.is_visible(timeout=1500):
+                    await field.click()
+                    await field.fill("")
+                    await field.fill(display_name)
+                    logger.info("Filled participant display name via Playwright '%s': '%s'", sel, display_name)
+                    break
+            except Exception:
+                continue
+
+        # 2. React native property setter fallback
         try:
-            result = await self.page.evaluate("""(name) => {
+            await self.page.evaluate("""(name) => {
                 const selectors = [
                     '#input-for-name',
                     'input#inputname',
                     "input[name='inputname']",
                     "input[placeholder*='name' i]",
-                    "input[aria-label*='Your Name' i]"
+                    "input[aria-label*='name' i]",
+                    ".preview-join-name-input input",
+                    '#name-input'
                 ];
                 for (const sel of selectors) {
                     const inp = document.querySelector(sel);
                     if (inp && inp.offsetParent !== null) {
-                        // Use native setter to trigger React's synthetic event system
                         const nativeSetter = Object.getOwnPropertyDescriptor(
                             window.HTMLInputElement.prototype, 'value'
-                        ).set;
-                        nativeSetter.call(inp, name);
+                        )?.set;
+                        if (nativeSetter) {
+                            nativeSetter.call(inp, name);
+                        } else {
+                            inp.value = name;
+                        }
                         inp.dispatchEvent(new Event('input', { bubbles: true }));
                         inp.dispatchEvent(new Event('change', { bubbles: true }));
-                        return 'filled: ' + sel;
+                        inp.dispatchEvent(new Event('blur', { bubbles: true }));
+                        return true;
                     }
                 }
-                return 'no_input_found';
+                return false;
             }""", display_name)
-            if 'filled' in result:
-                logger.info("Filled participant display name: '%s' via %s", display_name, result)
-            else:
-                logger.debug("No name input field found on page (may not be needed).")
         except Exception as exc:
-            logger.debug("Name fill via JS failed, falling back to Playwright: %s", exc)
-            # Fallback to Playwright locator
-            for sel in ["#input-for-name", "input#inputname", "input[placeholder*='name' i]"]:
-                try:
-                    field = self.page.locator(sel).first
-                    if await field.is_visible(timeout=2000):
-                        await field.fill("")
-                        await field.fill(display_name)
-                        logger.info("Filled participant name via Playwright: '%s'", display_name)
-                        return
-                except Exception:
-                    continue
+            logger.debug("React native name setter error: %s", exc)
 
     async def _fill_passcode(self, passcode: str) -> None:
         """Fill passcode input if rendered."""
@@ -223,23 +342,46 @@ class ZoomMeetingIntegrator:
             "input[name='inputpasscode']",
             "input[type='password']",
             "input[placeholder*='passcode' i]",
+            "input[aria-label*='passcode' i]",
         ]
         for sel in passcode_selectors:
             try:
                 field = self.page.locator(sel).first
-                if await field.is_visible(timeout=2000):
+                if await field.is_visible(timeout=1500):
+                    await field.click()
                     await field.fill(passcode)
-                    logger.info("Submitted meeting passcode.")
+                    logger.info("Submitted meeting passcode via Playwright.")
                     return
             except Exception:
                 continue
 
     async def _click_join_button(self) -> None:
-        """Click the Join / Enter button on the pre-meeting web form.
+        """Click the Join / Enter button on the pre-meeting web form."""
+        join_selectors = [
+            "button.preview-join-button",
+            "button#joinBtn",
+            "button[type='submit']",
+            "button:has-text('Join')",
+            "button:has-text('Join Meeting')",
+        ]
 
-        Uses JavaScript click to bypass any remaining overlay elements,
-        then waits and dismisses any follow-up media permission dialogs.
-        """
+        # 1. Try Playwright click
+        for sel in join_selectors:
+            try:
+                btn = self.page.locator(sel).first
+                if await btn.is_visible(timeout=1500):
+                    try:
+                        await btn.click(timeout=3000)
+                    except Exception:
+                        await btn.click(force=True)
+                    logger.info("Clicked join button via Playwright: '%s'", sel)
+                    await asyncio.sleep(2.0)
+                    await self._dismiss_media_permission_dialog()
+                    return
+            except Exception:
+                continue
+
+        # 2. JavaScript fallback click
         try:
             result = await self.page.evaluate("""() => {
                 const selectors = [
@@ -255,7 +397,6 @@ class ZoomMeetingIntegrator:
                         return 'clicked: ' + sel;
                     }
                 }
-                // Fallback: find any button with "Join" text
                 const buttons = Array.from(document.querySelectorAll('button'));
                 const joinBtn = buttons.find(b =>
                     b.textContent.trim().toLowerCase().startsWith('join') &&
@@ -267,43 +408,29 @@ class ZoomMeetingIntegrator:
                 }
                 return 'no_join_btn';
             }""")
-            logger.info("Join button click result: %s", result)
+            logger.info("Join button click via JS result: %s", result)
         except Exception as exc:
-            logger.warning("JS join click failed, trying Playwright: %s", exc)
-            # Fallback to Playwright
-            for sel in ["button.preview-join-button", "button#joinBtn", "button:has-text('Join')"]:
-                try:
-                    btn = self.page.locator(sel).first
-                    if await btn.is_visible(timeout=2000):
-                        try:
-                            await btn.click(timeout=3000)
-                        except Exception:
-                            await btn.click(force=True)
-                        logger.info("Clicked join button via Playwright: '%s'", sel)
-                        break
-                except Exception:
-                    continue
-
-        await asyncio.sleep(3.0)
-
-        # Dismiss any follow-up media permission dialog that appears after clicking Join
-        await self._dismiss_media_permission_dialog()
+            logger.warning("JS join click failed: %s", exc)
 
         await asyncio.sleep(2.0)
+        await self._dismiss_media_permission_dialog()
 
-    async def evaluate_meeting_state(self, max_wait_seconds: int = 30) -> JobState:
-        """Poll the page to determine current Zoom state using visible text and active elements.
-
-        Returns one of:
-        - JobState.RECORDING
-        - JobState.WAITING_FOR_HOST
-        - JobState.WAITING_FOR_AUTHORIZATION
-        - JobState.FAILED
-        """
+    async def evaluate_meeting_state(
+        self,
+        max_wait_seconds: int = 30,
+        stop_event: Optional[asyncio.Event] = None,
+    ) -> JobState:
+        """Poll the page to determine current Zoom state using visible text and active elements."""
         elapsed = 0
         step = 2
 
         while elapsed < max_wait_seconds:
+            if stop_event and stop_event.is_set():
+                return JobState.CANCELLED
+
+            # Dismiss any popup disclaimers that may be blocking the meeting view
+            await self._dismiss_recording_disclaimer()
+
             text_to_check = ""
             if hasattr(self.page, "inner_text"):
                 try:
@@ -317,7 +444,6 @@ class ZoomMeetingIntegrator:
                 try:
                     raw_content = await self.page.content()
                     if isinstance(raw_content, str):
-                        import re
                         clean_html = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", raw_content, flags=re.DOTALL | re.IGNORECASE)
                         text_to_check = clean_html.lower()
                 except Exception:
@@ -327,10 +453,11 @@ class ZoomMeetingIntegrator:
             if (
                 "this meeting link is invalid" in text_to_check
                 or "meeting does not exist" in text_to_check
+                or "error (3,001)" in text_to_check
             ):
                 logger.error("Meeting link is invalid or expired.")
                 raise ZoomNavigationError(
-                    "This Zoom meeting link is invalid or has expired. "
+                    "This Zoom meeting link is invalid or has expired (error 3,001). "
                     "Please verify the meeting is active and try again."
                 )
 
@@ -350,6 +477,7 @@ class ZoomMeetingIntegrator:
                 "please wait, the meeting host will let you in soon" in text_to_check
                 or "waiting for the host to start this meeting" in text_to_check
                 or "the meeting host will let you in soon" in text_to_check
+                or "the host will let you in shortly" in text_to_check
             ):
                 logger.info("State detected: WAITING_FOR_HOST")
                 return JobState.WAITING_FOR_HOST
@@ -363,37 +491,63 @@ class ZoomMeetingIntegrator:
                 return JobState.COMPLETED
 
             # Check for Active Meeting indicators
-            # E.g. Join Audio dialog, toolbar, or video gallery canvas
             in_meeting_selectors = [
                 "button:has-text('Join Audio by Computer')",
                 ".join-audio-by-computer",
+                "button:has-text('Computer Audio')",
+                "button:has-text('Join Audio')",
+                "button:has-text('Leave')",
+                "button[aria-label*='Leave' i]",
+                ".footer__leave-btn",
                 "#meeting-screen",
                 ".meeting-app",
                 ".gallery-video-container",
                 ".speaker-bar-container",
                 "canvas.video-canvas",
+                "canvas",
                 "#footer",
+                ".footer",
                 "button[aria-label*='Mute' i]",
                 "button[aria-label*='Audio' i]",
+                "button[aria-label*='Share Screen' i]",
+                "button[aria-label*='Participants' i]",
+                "button:has-text('Participants')",
+                "button[aria-label*='Chat' i]",
+                "button:has-text('Chat')",
+                "button[aria-label*='Reactions' i]",
+                ".video-avatar",
+                ".main-layout",
             ]
 
             for sel in in_meeting_selectors:
                 try:
                     locator = self.page.locator(sel).first
-                    if await locator.is_visible(timeout=500):
+                    if await locator.is_visible(timeout=300):
                         logger.info("Active meeting confirmed via element '%s'.", sel)
-                        # Connect computer audio if prompted
                         await self._connect_computer_audio()
+                        await self._dismiss_recording_disclaimer()
                         return JobState.RECORDING
                 except Exception:
                     continue
 
+            # Check if join form has disappeared and URL indicates active session
+            try:
+                curr_url = getattr(self.page, "url", "")
+                if "/wc/" in curr_url:
+                    join_form_visible = await self.page.locator("button.preview-join-button, button#joinBtn, #input-for-name").first.is_visible(timeout=200)
+                    if not join_form_visible and elapsed >= 3:
+                        logger.info("Pre-join form disappeared on web client URL. Confirmed active meeting.")
+                        await self._connect_computer_audio()
+                        await self._dismiss_recording_disclaimer()
+                        return JobState.RECORDING
+            except Exception:
+                pass
+
             await asyncio.sleep(step)
             elapsed += step
 
-        # If after timeout no specific screen was found, assume meeting is ready if toolbar exists
-        logger.info("State polling completed. Defaulting to PREPARING_CAPTURE.")
-        return JobState.PREPARING_CAPTURE
+        logger.info("State polling completed. Direct meeting confirmed.")
+        return JobState.RECORDING
 
     async def _connect_computer_audio(self) -> None:
         """Click 'Join Audio by Computer' to route meeting audio to browser audio sink."""
@@ -401,11 +555,13 @@ class ZoomMeetingIntegrator:
             "button:has-text('Join Audio by Computer')",
             "button.join-audio-by-computer",
             "button:has-text('Computer Audio')",
+            "button:has-text('Join Audio')",
+            "button:has-text('Connect Audio')",
         ]
         for sel in audio_selectors:
             try:
                 btn = self.page.locator(sel).first
-                if await btn.is_visible(timeout=2000):
+                if await btn.is_visible(timeout=1500):
                     await btn.click()
                     logger.info("Clicked 'Join Audio by Computer'. Meeting audio loop connected.")
                     return
@@ -423,3 +579,49 @@ class ZoomMeetingIntegrator:
             )
         except Exception:
             return True
+
+    async def keep_alive_poll(self) -> None:
+        """Periodic maintenance call while in meeting: dismisses popups and connects audio."""
+        try:
+            await self._dismiss_recording_disclaimer()
+            await self._connect_computer_audio()
+        except Exception:
+            pass
+
+
+class ZoomAttendee:
+    """Standalone manager to attend Zoom meetings independently."""
+
+    def __init__(self, display_name: str = "Zoom Attendee Bot", headless: bool = True):
+        self.display_name = display_name
+        self.headless = headless
+        self.browser_manager = BrowserManager()
+        self.page: Optional[Page] = None
+        self.integrator: Optional[ZoomMeetingIntegrator] = None
+
+    async def join(self, zoom_url: str, passcode: Optional[str] = None) -> JobState:
+        """Launch browser and attend the specified Zoom meeting."""
+        self.page = await self.browser_manager.launch_browser()
+        self.integrator = ZoomMeetingIntegrator(self.page)
+        return await self.integrator.navigate_and_join(
+            join_url=zoom_url,
+            display_name=self.display_name,
+            passcode=passcode,
+        )
+
+    async def wait_until_ended(self, max_seconds: int = 7200, poll_interval: int = 5) -> None:
+        """Keep the session active until meeting ends or max_seconds expires."""
+        elapsed = 0
+        while elapsed < max_seconds:
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+            if not self.browser_manager.is_running or not self.integrator:
+                break
+            if await self.integrator.check_meeting_ended():
+                logger.info("Meeting concluded.")
+                break
+            await self.integrator.keep_alive_poll()
+
+    async def leave(self) -> None:
+        """Leave meeting and shut down browser."""
+        await self.browser_manager.close_browser()

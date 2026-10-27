@@ -132,3 +132,30 @@ async def test_cancel_vs_stop_rules():
     success2, msg2 = await manager.cancel_job("REC-TEST-RECORDING", user.id)
     assert success2 is False
     assert "cannot be cancelled in state 'RECORDING'" in msg2
+
+
+@pytest.mark.asyncio
+async def test_stop_job_pre_recording_state():
+    """Verify stop_job handles jobs in JOINING_MEETING or pre-recording state cleanly."""
+    manager = JobManager()
+    user = await get_or_create_user(telegram_id=1001)
+
+    await create_recording_job(
+        user_id=user.id,
+        job_id="REC-TEST-PRE-STOP",
+        zoom_url="https://zoom.us/j/777",
+        meeting_id="777",
+        passcode=None,
+        display_name="Bot",
+    )
+    await update_job_status("REC-TEST-PRE-STOP", JobState.JOINING_MEETING)
+
+    success, msg = await manager.stop_job("REC-TEST-PRE-STOP", user.id)
+    assert success is True
+    assert "cancelled by user" in msg.lower() or "stopped" in msg.lower()
+
+    # Re-stopping after cancellation informs that it has concluded
+    success_again, msg_again = await manager.stop_job("REC-TEST-PRE-STOP", user.id)
+    assert success_again is False
+    assert "already concluded" in msg_again.lower()
+

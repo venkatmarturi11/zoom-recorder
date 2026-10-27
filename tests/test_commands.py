@@ -232,3 +232,31 @@ async def test_handle_message_raw_zoom_link(mock_telegram_update, mock_job_manag
     assert "Recording request received" in reply
     assert "JOB-TEST-AUTO" in reply
 
+
+@pytest.mark.asyncio
+async def test_get_main_menu_keyboard():
+    """Verify persistent bottom menu bar contains expected quick buttons."""
+    from app.commands import get_main_menu_keyboard
+    kb = get_main_menu_keyboard()
+    assert kb.resize_keyboard is True
+    assert kb.is_persistent is True
+    button_texts = [btn.text for row in kb.keyboard for btn in row]
+    assert "🎥 Join Meeting" in button_texts
+    assert "📊 Status" in button_texts
+    assert "⏹️ Stop Recording" in button_texts
+    assert "📁 Recordings" in button_texts
+    assert "🏷️ Set Bot Name" in button_texts
+    assert "🛟 Help" in button_texts
+
+
+@pytest.mark.asyncio
+async def test_handle_message_menu_button_tap(mock_telegram_update):
+    """Verify tapping '🎥 Join Meeting' on the persistent menu bar triggers join guide."""
+    update, context = mock_telegram_update(user_id=1001, text="🎥 Join Meeting")
+    await handle_message(update, context)
+    update.effective_message.reply_text.assert_called_once()
+    reply = _extract_reply_text(update.effective_message.reply_text.call_args)
+    assert "Join & Record Zoom Meeting" in reply
+    assert "zoom.us" in reply
+
+

@@ -3,7 +3,13 @@
 import logging
 import re
 from typing import Optional
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.ext import ContextTypes
 
 from app.auth import authorized_telegram_user_only
@@ -31,6 +37,20 @@ job_manager: Optional[JobManager] = None
 def set_job_manager(manager: JobManager) -> None:
     global job_manager
     job_manager = manager
+
+
+def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
+    """Return the persistent bottom menu bar keyboard docked below chat input."""
+    keyboard = [
+        [KeyboardButton("🎥 Join Meeting"), KeyboardButton("📊 Status")],
+        [KeyboardButton("⏹️ Stop Recording"), KeyboardButton("📁 Recordings")],
+        [KeyboardButton("🏷️ Set Bot Name"), KeyboardButton("🛟 Help")],
+    ]
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,
+        is_persistent=True,
+    )
 
 
 @authorized_telegram_user_only
@@ -87,7 +107,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         text=text,
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=get_main_menu_keyboard(),
     )
 
 
@@ -317,16 +337,22 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("❌ No active recording found to stop.")
         return
 
-    success = await job_manager.stop_job(target_job.job_id, db_user.id)
+    res = await job_manager.stop_job(target_job.job_id, db_user.id)
+    if isinstance(res, tuple):
+        success, msg = res
+    else:
+        success = bool(res)
+        msg = "Packaging and uploading MP4... You will receive the download link shortly." if success else "Job is not actively recording or already stopped."
+
     if success:
         await update.effective_message.reply_text(
             f"⏹️ *Stop Signal Sent*\n\n"
-            f"Finalizing media recording for `{target_job.job_id}`.\n"
-            "Packaging and uploading MP4... You will receive the download link shortly.",
+            f"Finalizing session for `{target_job.job_id}`.\n"
+            f"{msg}",
             parse_mode="Markdown",
         )
     else:
-        await update.effective_message.reply_text("⚠️ Job is not actively recording or already stopped.")
+        await update.effective_message.reply_text(f"⚠️ {msg}")
 
 
 @authorized_telegram_user_only
@@ -467,12 +493,18 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     if data.startswith("stop_"):
         job_id = data.replace("stop_", "")
         if job_manager:
-            success = await job_manager.stop_job(job_id, db_user.id)
+            res = await job_manager.stop_job(job_id, db_user.id)
+            if isinstance(res, tuple):
+                success, msg = res
+            else:
+                success = bool(res)
+                msg = "Finalizing media." if success else "Could not stop recording."
+
             if success:
                 await query.edit_message_reply_markup(reply_markup=None)
-                await query.message.reply_text(f"⏹️ Stopping recording `{job_id}`... Finalizing media.")
+                await query.message.reply_text(f"⏹️ Stopping `{job_id}`: {msg}")
             else:
-                await query.message.reply_text("⚠️ Could not stop recording.")
+                await query.message.reply_text(f"ℹ️ {msg}")
 
     elif data.startswith("status_"):
         job_id = data.replace("status_", "")
@@ -525,6 +557,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     text = update.effective_message.text.strip()
 
+    # Handle persistent bottom menu bar button taps
+    if text in ("🎥 Join Meeting", "Join Meeting"):
+        await update.effective_message.reply_text(
+            "🎥 *Join & Record Zoom Meeting*\n\n"
+            "Please send or paste your Zoom meeting link directly here in the chat:\n"
+            "Example: `https://zoom.us/j/1234567890?pwd=secret`\n\n"
+            "_The bot will immediately join and record the meeting!_",
+            parse_mode="Markdown",
+            reply_markup=get_main_menu_keyboard(),
+        )
+        return
+    elif text in ("📊 Status", "Status"):
+        await cmd_status(update, context)
+        return
+    elif text in ("⏹️ Stop Recording", "Stop Recording", "Stop"):
+        await cmd_stop(update, context)
+        return
+    elif text in ("📁 Recordings", "Recordings", "📁 My Recordings"):
+        await cmd_recordings(update, context)
+        return
+    elif text in ("🏷️ Set Bot Name", "Set Bot Name"):
+        await cmd_setname(update, context)
+        return
+    elif text in ("🛟 Help", "Help", "ℹ️ Help"):
+        await cmd_help(update, context)
+        return
+
     # Search for Zoom URL in message
     zoom_match = re.search(r"https?://[^\s]*zoom(?:gov)?\.(?:us|com)/[^\s]+", text, re.IGNORECASE)
     if not zoom_match:
@@ -546,31 +605,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     reply = (
         f"👋 *Hi {user.first_name}!*\n\n"
-        "To start recording, simply *send or paste a Zoom meeting link* here!\n\n"
+        "To start recording, simply *send or paste a Zoom meeting link* here or tap *'🎥 Join Meeting'* below!\n\n"
         f"🏷️ *Bot Participant Name:* `{active_bot_name}`\n\n"
         "🚀 *Commands & Quick Controls:*\n"
-        "• Paste any Zoom link or use `/join <link>`\n"
-        "• `/status` - Check current recording status\n"
-        "• `/stop` - Stop active recording & upload MP4\n"
-        "• `/setname <name>` - Change your bot's name in meetings\n"
-        "• `/recordings` - View past recordings & download links\n"
-        "• `/help` - View complete help guide"
+        "• 🎥 *Join Meeting* - Paste any Zoom link\n"
+        "• 📊 *Status* - Check current recording status\n"
+        "• ⏹️ *Stop Recording* - Stop active recording & get MP4\n"
+        "• 📁 *Recordings* - View past recordings & download links\n"
+        "• 🏷️ *Set Bot Name* - Change your bot's name in meetings\n"
+        "• 🛟 *Help* - View complete instructions"
     )
-
-    keyboard = [
-        [
-            InlineKeyboardButton("📊 Status", callback_data="cmd_status"),
-            InlineKeyboardButton("📁 My Recordings", callback_data="cmd_recordings"),
-        ],
-        [
-            InlineKeyboardButton("🏷️ Set Bot Name", callback_data="cmd_setname"),
-            InlineKeyboardButton("ℹ️ Help", callback_data="cmd_help"),
-        ],
-    ]
 
     await update.effective_message.reply_text(
         text=reply,
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=get_main_menu_keyboard(),
     )
 

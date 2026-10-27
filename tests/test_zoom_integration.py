@@ -44,3 +44,35 @@ async def test_meeting_ended_detection():
     state = await integrator.evaluate_meeting_state(max_wait_seconds=1)
     assert state == JobState.COMPLETED
     assert await integrator.check_meeting_ended() is True
+
+
+@pytest.mark.asyncio
+async def test_stop_event_cancels_navigation():
+    """Verify stop_event interrupts navigation immediately."""
+    import asyncio
+    mock_page = MagicMock()
+    integrator = ZoomMeetingIntegrator(mock_page)
+
+    stop_event = asyncio.Event()
+    stop_event.set()
+
+    state = await integrator.navigate_and_join(
+        join_url="https://zoom.us/wc/123/join",
+        display_name="TestBot",
+        stop_event=stop_event,
+    )
+    assert state == JobState.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_invalid_link_raises_zoom_navigation_error():
+    """Verify invalid meeting link error raises ZoomNavigationError."""
+    from app.zoom_integration import ZoomNavigationError
+    mock_page = MagicMock()
+    mock_page.title = AsyncMock(return_value="Error - Zoom")
+    mock_page.inner_text = AsyncMock(return_value="This meeting link is invalid (3,001)")
+
+    integrator = ZoomMeetingIntegrator(mock_page)
+    with pytest.raises(ZoomNavigationError, match="3,001"):
+        await integrator._check_immediate_errors()
+

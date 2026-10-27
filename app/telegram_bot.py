@@ -106,6 +106,24 @@ class TelegramBotApp:
         await self.app.initialize()
         await self.app.start()
 
+        # Register Telegram Commands Menu (the blue "Menu" button next to input bar)
+        try:
+            from telegram import BotCommand
+            commands = [
+                BotCommand("join", "Join and record a Zoom meeting"),
+                BotCommand("status", "Check current recording status"),
+                BotCommand("stop", "Stop active recording & upload MP4"),
+                BotCommand("recordings", "View past recordings & download links"),
+                BotCommand("setname", "Change bot display name in meetings"),
+                BotCommand("help", "Help guide & instructions"),
+                BotCommand("cancel", "Cancel queued recording job"),
+                BotCommand("health", "System health report"),
+            ]
+            await self.app.bot.set_my_commands(commands)
+            logger.info("Configured Telegram Bot Command Menu successfully.")
+        except Exception as exc:
+            logger.debug("Could not set Telegram bot commands menu (non-critical): %s", exc)
+
         if self.settings.webhook_url:
             logger.info("Starting Telegram Bot in Webhook mode on port %d...", self.settings.effective_port)
             await self.app.updater.start_webhook(
