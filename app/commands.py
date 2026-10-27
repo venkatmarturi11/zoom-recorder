@@ -315,12 +315,32 @@ async def cmd_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     raw_url = context.args[0]
-    display_name_override = " ".join(context.args[1:]).strip() if len(context.args) > 1 else None
+    explicit_passcode: Optional[str] = None
+    display_name_override: Optional[str] = None
+
+    if len(context.args) > 1:
+        arg1 = context.args[1].strip()
+        if arg1.lower().startswith("pwd=") or arg1.lower().startswith("passcode="):
+            explicit_passcode = arg1.split("=", 1)[1].strip()
+            if len(context.args) > 2:
+                display_name_override = " ".join(context.args[2:]).strip()
+        elif "?" not in raw_url or "pwd=" not in raw_url:
+            if len(context.args) >= 3 or (len(arg1) <= 20 and not any(c in arg1 for c in " /")):
+                explicit_passcode = arg1
+                if len(context.args) > 2:
+                    display_name_override = " ".join(context.args[2:]).strip()
+            else:
+                display_name_override = " ".join(context.args[1:]).strip()
+        else:
+            display_name_override = " ".join(context.args[1:]).strip()
+
     tg_user = update.effective_user
 
     # 1. Validate Zoom URL & SSRF
     try:
-        normalized_url, meeting_id, passcode = validate_and_parse_zoom_url(raw_url)
+        normalized_url, meeting_id, passcode = validate_and_parse_zoom_url(
+            raw_url, explicit_passcode=explicit_passcode
+        )
     except InvalidZoomURLError as err:
         await update.effective_message.reply_text(
             f"❌ *Invalid Zoom URL*\n\n{str(err)}",

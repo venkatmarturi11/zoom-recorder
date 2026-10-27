@@ -76,3 +76,97 @@ async def test_invalid_link_raises_zoom_navigation_error():
     with pytest.raises(ZoomNavigationError, match="3,001"):
         await integrator._check_immediate_errors()
 
+
+@pytest.mark.asyncio
+async def test_passcode_required_raises_zoom_access_error():
+    """Verify missing passcode when required raises ZoomAccessError."""
+    from app.zoom_integration import ZoomAccessError
+    mock_page = MagicMock()
+    mock_page.goto = AsyncMock()
+    mock_page.title = AsyncMock(return_value="Join Meeting - Zoom")
+    mock_page.inner_text = AsyncMock(return_value="")
+    mock_page.evaluate = AsyncMock(return_value=None)
+
+    # Passcode field locator returns is_visible=True
+    mock_pwd_locator = MagicMock()
+    mock_pwd_locator.is_visible = AsyncMock(return_value=True)
+
+    def mock_locator(sel):
+        loc = MagicMock()
+        if "pwd" in sel or "passcode" in sel:
+            loc.first = mock_pwd_locator
+        else:
+            loc_first = MagicMock()
+            loc_first.is_visible = AsyncMock(return_value=False)
+            loc.first = loc_first
+        return loc
+
+    mock_page.locator = mock_locator
+    integrator = ZoomMeetingIntegrator(mock_page)
+
+    with pytest.raises(ZoomAccessError, match="requires a passcode"):
+        await integrator.navigate_and_join(
+            join_url="https://app.zoom.us/wc/join/83373006475",
+            display_name="TestBot",
+            passcode=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_incorrect_passcode_raises_zoom_access_error():
+    """Verify incorrect passcode message raises ZoomAccessError during state evaluation."""
+    from app.zoom_integration import ZoomAccessError
+    mock_page = MagicMock()
+    mock_page.inner_text = AsyncMock(return_value="Incorrect password. Please try again.")
+
+    mock_err_loc = MagicMock()
+    mock_err_loc.is_visible = AsyncMock(return_value=True)
+    mock_err_loc.inner_text = AsyncMock(return_value="Incorrect Password")
+
+    def mock_locator(sel):
+        loc = MagicMock()
+        if "error" in sel:
+            loc.first = mock_err_loc
+        else:
+            loc_first = MagicMock()
+            loc_first.is_visible = AsyncMock(return_value=False)
+            loc.first = loc_first
+        return loc
+
+    mock_page.locator = mock_locator
+    integrator = ZoomMeetingIntegrator(mock_page)
+
+    with pytest.raises(ZoomAccessError, match="Incorrect Zoom meeting passcode"):
+        await integrator.evaluate_meeting_state(max_wait_seconds=2)
+
+
+@pytest.mark.asyncio
+async def test_prejoin_guard_prevents_false_recording():
+    """Verify preview screen elements prevent premature RECORDING state."""
+    from app.zoom_integration import ZoomNavigationError
+    mock_page = MagicMock()
+    mock_page.inner_text = AsyncMock(return_value="Enter your name and join")
+    mock_page.content = AsyncMock(return_value="<html><body>preview</body></html>")
+    mock_page.evaluate = AsyncMock(return_value=None)
+
+    # Pre-join form is visible
+    mock_prejoin_loc = MagicMock()
+    mock_prejoin_loc.is_visible = AsyncMock(return_value=True)
+
+    def mock_locator(sel):
+        loc = MagicMock()
+        if "input-for-name" in sel or "preview-join-button" in sel:
+            loc.first = mock_prejoin_loc
+        else:
+            loc_first = MagicMock()
+            loc_first.is_visible = AsyncMock(return_value=False)
+            loc.first = loc_first
+        return loc
+
+    mock_page.locator = mock_locator
+    integrator = ZoomMeetingIntegrator(mock_page)
+
+    with pytest.raises(ZoomNavigationError, match="Stuck on pre-join preview screen"):
+        await integrator.evaluate_meeting_state(max_wait_seconds=2)
+
+

@@ -119,6 +119,14 @@ async def get_or_create_user(
         return user
 
 
+async def get_user_by_id(user_id: int) -> Optional[User]:
+    """Retrieve user record by database primary key ID."""
+    async with async_session_factory() as session:
+        stmt = select(User).where(User.id == user_id)
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+
 async def set_user_display_name(telegram_id: int, display_name: str) -> Optional[User]:
     """Save the user's custom one-time configured Zoom bot participant name."""
     async with async_session_factory() as session:

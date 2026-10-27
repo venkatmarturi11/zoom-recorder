@@ -37,6 +37,20 @@ def test_valid_zoom_urls():
     assert mid4 == "1122334455"
     assert pwd4 == "test"
 
+    # Raw meeting ID (digits only)
+    url5 = "83373006475"
+    norm5, mid5, pwd5 = validate_and_parse_zoom_url(url5)
+    assert mid5 == "83373006475"
+    assert norm5 == "https://app.zoom.us/wc/join/83373006475"
+    assert pwd5 is None
+
+    # Raw meeting ID with explicit passcode
+    url6 = "833 7300 6475"
+    norm6, mid6, pwd6 = validate_and_parse_zoom_url(url6, explicit_passcode="mypass123")
+    assert mid6 == "83373006475"
+    assert pwd6 == "mypass123"
+    assert "pwd=mypass123" in norm6
+
 
 def test_invalid_domains():
     """Ensure non-Zoom domains are rejected."""

@@ -108,6 +108,30 @@ async def test_cmd_join_success(mock_telegram_update, mock_job_manager):
 
 
 @pytest.mark.asyncio
+async def test_cmd_join_with_id_and_passcode(mock_telegram_update, mock_job_manager):
+    update, context = mock_telegram_update(
+        user_id=1001,
+        args=["83373006475", "secretpwd123"],
+    )
+
+    fake_job = MagicMock()
+    fake_job.job_id = "REC-1002"
+    fake_job.meeting_id = "83373006475"
+    mock_job_manager.create_and_start_job.return_value = fake_job
+
+    await cmd_join(update, context)
+    update.effective_message.reply_text.assert_called_once()
+    args, _ = update.effective_message.reply_text.call_args
+    assert "Recording request received" in args[0]
+    assert "REC-1002" in args[0]
+    # Check that job_manager was called with the passcode
+    _, kwargs = mock_job_manager.create_and_start_job.call_args
+    assert kwargs["passcode"] == "secretpwd123"
+    assert kwargs["meeting_id"] == "83373006475"
+
+
+
+@pytest.mark.asyncio
 async def test_cmd_join_missing_url(mock_telegram_update, mock_job_manager):
     update, context = mock_telegram_update(user_id=1001, args=[])
     await cmd_join(update, context)

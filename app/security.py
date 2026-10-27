@@ -51,13 +51,16 @@ def is_private_or_reserved_ip(ip_str: str) -> bool:
         return True
 
 
-def validate_and_parse_zoom_url(url_str: str) -> Tuple[str, str, Optional[str]]:
-    """Validate a submitted Zoom URL and extract meeting details.
+def validate_and_parse_zoom_url(
+    url_str: str,
+    explicit_passcode: Optional[str] = None,
+) -> Tuple[str, str, Optional[str]]:
+    """Validate a submitted Zoom URL or meeting ID and extract meeting details.
 
     Performs strict domain validation, SSRF checks, and parses:
     - Normalized web client join URL
     - Meeting ID
-    - Passcode (if present in query)
+    - Passcode (from query string or explicit argument)
 
     Returns:
         (normalized_join_url, meeting_id, passcode)
@@ -70,6 +73,12 @@ def validate_and_parse_zoom_url(url_str: str) -> Tuple[str, str, Optional[str]]:
         raise InvalidZoomURLError("Empty or non-string Zoom URL provided.")
 
     trimmed = url_str.strip().strip("<>\"'").strip()
+
+    # Check if raw meeting ID was provided (e.g. "83373006475" or "833 7300 6475")
+    digits_only = re.sub(r"[\s-]+", "", trimmed)
+    if MEETING_ID_PATTERN.match(digits_only):
+        trimmed = f"https://app.zoom.us/wc/join/{digits_only}"
+
     if not (trimmed.startswith("http://") or trimmed.startswith("https://")):
         trimmed = "https://" + trimmed
 
@@ -118,11 +127,13 @@ def validate_and_parse_zoom_url(url_str: str) -> Tuple[str, str, Optional[str]]:
     if not meeting_id or not MEETING_ID_PATTERN.match(meeting_id):
         raise InvalidZoomURLError("Could not locate a valid 9-to-11 digit Zoom Meeting ID in the provided URL.")
 
-    # Parse passcode from query string (pwd=...)
+    # Parse passcode from query string (pwd=...) or explicit argument
     qs = parse_qs(parsed.query)
     passcode = None
     if "pwd" in qs and qs["pwd"]:
         passcode = qs["pwd"][0].strip()
+    elif explicit_passcode and explicit_passcode.strip():
+        passcode = explicit_passcode.strip()
 
     # Generate standardized Zoom Web Client Join URL
     # Format: https://app.zoom.us/wc/join/{meeting_id}

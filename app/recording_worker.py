@@ -21,7 +21,7 @@ from app.media_processor import MediaProcessor
 from app.models import JobState, RecordingJob
 from app.notifications import NotificationService
 from app.storage import get_storage_provider
-from app.zoom_integration import ZoomMeetingIntegrator
+from app.zoom_integration import ZoomAccessError, ZoomMeetingIntegrator, ZoomNavigationError
 
 logger = logging.getLogger("zoom_recorder.worker")
 
@@ -207,6 +207,32 @@ class RecordingWorker:
                     final_mp4_path.unlink()
                 logger.info("Cleaned up local temporary video files after external S3 upload.")
 
+        except ZoomAccessError as exc:
+            logger.warning("Job %s access error: %s", self.job.job_id, exc)
+            await self._update_state(JobState.FAILED, f"Access blocked: {str(exc)}", error_message=str(exc))
+            if self.notifier:
+                await self.notifier.send_custom_message(
+                    chat_id=self.telegram_chat_id,
+                    message_text=(
+                        f"🔒 *Zoom Access Blocked*\n\n"
+                        f"{str(exc)}\n\n"
+                        f"• *Job ID:* `{self.job.job_id}`\n"
+                        f"• *Meeting ID:* `{self.job.meeting_id}`"
+                    ),
+                )
+        except ZoomNavigationError as exc:
+            logger.warning("Job %s navigation error: %s", self.job.job_id, exc)
+            await self._update_state(JobState.FAILED, f"Join error: {str(exc)}", error_message=str(exc))
+            if self.notifier:
+                await self.notifier.send_custom_message(
+                    chat_id=self.telegram_chat_id,
+                    message_text=(
+                        f"❌ *Zoom Join Error*\n\n"
+                        f"{str(exc)}\n\n"
+                        f"• *Job ID:* `{self.job.job_id}`\n"
+                        f"• *Meeting ID:* `{self.job.meeting_id}`"
+                    ),
+                )
         except Exception as exc:
             logger.error("Job %s execution failed: %s", self.job.job_id, exc, exc_info=True)
             await self._update_state(JobState.FAILED, f"Recording failed: {str(exc)}", error_message=str(exc))

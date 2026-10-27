@@ -4,9 +4,10 @@ import asyncio
 from unittest.mock import AsyncMock, patch
 import pytest
 
+import app.database as db
 from app.database import create_recording_job, get_or_create_user, get_recording_job, update_job_status
 from app.job_manager import JobManager
-from app.models import JobState
+from app.models import JobState, User
 
 
 @pytest.mark.asyncio
@@ -158,4 +159,47 @@ async def test_stop_job_pre_recording_state():
     success_again, msg_again = await manager.stop_job("REC-TEST-PRE-STOP", user.id)
     assert success_again is False
     assert "already concluded" in msg_again.lower()
+
+
+@pytest.mark.asyncio
+async def test_stop_job_error_clarity_and_permissions():
+    """Verify informative error messages for missing jobs and admin stop overrides."""
+    manager = JobManager()
+    owner = await get_or_create_user(telegram_id=2001)
+    other_user = await get_or_create_user(telegram_id=2002)
+
+    # 1. Job does not exist
+    success, msg = await manager.stop_job("REC-NONEXISTENT", owner.id)
+    assert success is False
+    assert "not found" in msg.lower()
+    assert "REC-NONEXISTENT" in msg
+
+    # Create job for owner
+    await create_recording_job(
+        user_id=owner.id,
+        job_id="REC-PERM-TEST",
+        zoom_url="https://zoom.us/j/888",
+        meeting_id="888",
+        passcode=None,
+        display_name="Bot",
+    )
+    await update_job_status("REC-PERM-TEST", JobState.RECORDING)
+
+    # 2. Other non-admin user cannot stop
+    other_user.is_admin = False
+    success_other, msg_other = await manager.stop_job("REC-PERM-TEST", other_user.id)
+    assert success_other is False
+    assert "access denied" in msg_other.lower()
+
+    # 3. Admin user CAN stop
+    other_user.is_admin = True
+    async with db.async_session_factory() as session:
+        db_u = (await session.execute(db.select(db.User).where(db.User.id == other_user.id))).scalar_one()
+        db_u.is_admin = True
+        await session.commit()
+
+    success_admin, msg_admin = await manager.stop_job("REC-PERM-TEST", other_user.id)
+    assert success_admin is True
+    assert "stopping" in msg_admin.lower() or "stop signal" in msg_admin.lower()
+
 

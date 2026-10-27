@@ -68,7 +68,7 @@ class ZoomMeetingIntegrator:
             # 4. Dismiss any Cookie Consent or Privacy banners
             await self._dismiss_cookie_dialogs()
 
-            # 5. Dismiss Zoom's media permission dialog (pepc)
+            # 5. Dismiss Zoom's media permission dialog (pepc) and purge overlays
             await self._dismiss_media_permission_dialog()
 
             if stop_event and stop_event.is_set():
@@ -77,9 +77,17 @@ class ZoomMeetingIntegrator:
             # 6. Input Participant Name if name input field is visible
             await self._fill_participant_name(display_name)
 
-            # 7. Input Passcode if passcode field is prompted
-            if passcode:
-                await self._fill_passcode(passcode)
+            # 7. Check if passcode field is prompted
+            pwd_field_visible = await self._is_passcode_field_visible()
+            if pwd_field_visible:
+                if passcode:
+                    await self._fill_passcode(passcode)
+                else:
+                    logger.warning("Meeting requires a passcode, but none was provided.")
+                    raise ZoomAccessError(
+                        "This Zoom meeting requires a passcode. Please provide the meeting invite link "
+                        "containing the '?pwd=...' parameter, or supply the passcode (e.g., /join <meeting_id> <passcode>)."
+                    )
 
             # 8. Accept any Terms of Service / Privacy checkboxes if present
             await self._handle_terms_checkbox()
@@ -91,7 +99,7 @@ class ZoomMeetingIntegrator:
             await self._click_join_button()
 
             # 10. Evaluate landing state
-            return await self.evaluate_meeting_state(max_wait_seconds=30, stop_event=stop_event)
+            return await self.evaluate_meeting_state(max_wait_seconds=35, stop_event=stop_event)
 
         except PlaywrightTimeoutError as exc:
             logger.error("Navigation timeout while joining Zoom meeting: %s", exc)
@@ -197,42 +205,94 @@ class ZoomMeetingIntegrator:
                 continue
 
     async def _dismiss_media_permission_dialog(self) -> None:
-        """Dismiss Zoom's media permission (pepc) dialog via JavaScript.
+        """Dismiss Zoom's media permission (pepc) dialog and purge blocking overlays.
 
-        This dialog asks "Do you want people to hear you in the meeting?" with a
-        "Continue without microphone and camera" button.
+        This dialog asks "Do you want people to see you in the meeting?" with a
+        "Continue without microphone and camera" button, backed by a ReactModal
+        overlay with z-index: 20001 that intercepts all pointer events.
         """
         try:
-            result = await self.page.evaluate("""() => {
+            await self.page.evaluate("""() => {
+                // 1. Try clicking PEPC / Continue without audio/video buttons
                 const pepcBtn = document.querySelector('.pepc-permission-dialog__footer-button');
                 if (pepcBtn) {
-                    pepcBtn.click();
-                    return 'dismissed_pepc';
+                    try { pepcBtn.click(); } catch (e) {}
                 }
-                const buttons = Array.from(document.querySelectorAll('button'));
-                const continueBtn = buttons.find(b =>
-                    b.textContent.toLowerCase().includes('continue without')
-                );
+                const buttons = Array.from(document.querySelectorAll('button, span, a'));
+                const continueBtn = buttons.find(b => {
+                    const txt = (b.textContent || '').trim().toLowerCase();
+                    return txt.includes('continue without') || txt.includes('join without audio');
+                });
                 if (continueBtn) {
-                    continueBtn.click();
-                    return 'dismissed_continue';
+                    try { continueBtn.click(); } catch (e) {}
                 }
-                return 'no_dialog';
-            }""")
-            if result != 'no_dialog':
-                logger.info("Dismissed media permission dialog: %s", result)
-                await asyncio.sleep(0.8)
 
-                # Remove any lingering ReactModal overlay that blocks clicks
-                await self.page.evaluate("""() => {
-                    const overlays = document.querySelectorAll(
-                        '.ReactModal__Overlay, .ReactModal__Content'
-                    );
-                    overlays.forEach(el => el.remove());
-                }""")
-                await asyncio.sleep(0.3)
+                // 2. Unconditionally purge any ReactModal overlays, backdrops, and containers
+                const overlays = document.querySelectorAll(
+                    '.ReactModal__Overlay, .ReactModal__Content, .ReactModalPortal'
+                );
+                overlays.forEach(el => el.remove());
+
+                // 3. Remove ReactModal open class on body to restore scrolling and pointer events
+                if (document.body) {
+                    document.body.classList.remove('ReactModal__Body--open');
+                    document.body.style.removeProperty('overflow');
+                }
+                return true;
+            }""")
+            await asyncio.sleep(0.2)
         except Exception as exc:
             logger.debug("Media permission dialog dismissal (non-critical): %s", exc)
+
+    async def _is_passcode_field_visible(self) -> bool:
+        """Check if passcode input field is currently displayed on the page."""
+        passcode_selectors = [
+            "#input-for-pwd",
+            "input#inputpasscode",
+            "input[name='inputpasscode']",
+            "input[type='password']",
+        ]
+        for sel in passcode_selectors:
+            try:
+                field = self.page.locator(sel).first
+                if await field.is_visible(timeout=800):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _is_prejoin_visible(self) -> bool:
+        """Check if Zoom pre-meeting preview / join form is visible."""
+        try:
+            selectors = [
+                "#input-for-name",
+                "#input-for-pwd",
+                "button.preview-join-button",
+                ".preview-join-name-input",
+                ".preview-meeting-info",
+            ]
+            for sel in selectors:
+                loc = self.page.locator(sel).first
+                if await loc.is_visible(timeout=150):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    async def _check_passcode_error(self) -> Optional[str]:
+        """Check if an incorrect passcode error message is visible."""
+        try:
+            err_loc = self.page.locator("#error-for-pwd, .preview-meeting-info__field-error").first
+            if await err_loc.is_visible(timeout=150):
+                txt = (await err_loc.inner_text()).strip()
+                if txt:
+                    return txt
+            body_text = (await self.page.inner_text("body")).lower()
+            if "incorrect password" in body_text or "wrong meeting passcode" in body_text:
+                return "Incorrect meeting passcode."
+        except Exception:
+            pass
+        return None
 
     async def _dismiss_recording_disclaimer(self) -> None:
         """Dismiss Zoom's 'This meeting is being recorded' or consent modal."""
@@ -273,9 +333,10 @@ class ZoomMeetingIntegrator:
     async def _fill_participant_name(self, display_name: str) -> None:
         """Locate and enter the authorized bot participant display name.
 
-        Uses Playwright fill (dispatches keyboard events) and JS native descriptor
-        setter to guarantee internal React state synchronization.
+        Uses Playwright fill and JS native descriptor setter to guarantee
+        internal React state synchronization.
         """
+        await self._dismiss_media_permission_dialog()
         selectors = [
             "#input-for-name",
             "input#inputname",
@@ -291,8 +352,11 @@ class ZoomMeetingIntegrator:
         for sel in selectors:
             try:
                 field = self.page.locator(sel).first
-                if await field.is_visible(timeout=1500):
-                    await field.click()
+                if await field.is_visible(timeout=1000):
+                    try:
+                        await field.click(timeout=1000)
+                    except Exception:
+                        await field.click(force=True, timeout=1000)
                     await field.fill("")
                     await field.fill(display_name)
                     logger.info("Filled participant display name via Playwright '%s': '%s'", sel, display_name)
@@ -314,7 +378,7 @@ class ZoomMeetingIntegrator:
                 ];
                 for (const sel of selectors) {
                     const inp = document.querySelector(sel);
-                    if (inp && inp.offsetParent !== null) {
+                    if (inp) {
                         const nativeSetter = Object.getOwnPropertyDescriptor(
                             window.HTMLInputElement.prototype, 'value'
                         )?.set;
@@ -336,6 +400,7 @@ class ZoomMeetingIntegrator:
 
     async def _fill_passcode(self, passcode: str) -> None:
         """Fill passcode input if rendered."""
+        await self._dismiss_media_permission_dialog()
         passcode_selectors = [
             "#input-for-pwd",
             "input#inputpasscode",
@@ -347,77 +412,125 @@ class ZoomMeetingIntegrator:
         for sel in passcode_selectors:
             try:
                 field = self.page.locator(sel).first
-                if await field.is_visible(timeout=1500):
-                    await field.click()
+                if await field.is_visible(timeout=1000):
+                    try:
+                        await field.click(timeout=1000)
+                    except Exception:
+                        await field.click(force=True, timeout=1000)
+                    await field.fill("")
                     await field.fill(passcode)
                     logger.info("Submitted meeting passcode via Playwright.")
-                    return
+                    break
             except Exception:
                 continue
 
+        # React native setter fallback for passcode
+        try:
+            await self.page.evaluate("""(pwd) => {
+                const selectors = [
+                    '#input-for-pwd',
+                    'input#inputpasscode',
+                    "input[name='inputpasscode']",
+                    "input[type='password']",
+                    "input[placeholder*='passcode' i]",
+                    "input[aria-label*='passcode' i]"
+                ];
+                for (const sel of selectors) {
+                    const inp = document.querySelector(sel);
+                    if (inp) {
+                        const nativeSetter = Object.getOwnPropertyDescriptor(
+                            window.HTMLInputElement.prototype, 'value'
+                        )?.set;
+                        if (nativeSetter) {
+                            nativeSetter.call(inp, pwd);
+                        } else {
+                            inp.value = pwd;
+                        }
+                        inp.dispatchEvent(new Event('input', { bubbles: true }));
+                        inp.dispatchEvent(new Event('change', { bubbles: true }));
+                        inp.dispatchEvent(new Event('blur', { bubbles: true }));
+                        return true;
+                    }
+                }
+                return false;
+            }""", passcode)
+        except Exception as exc:
+            logger.debug("React native passcode setter error: %s", exc)
+
     async def _click_join_button(self) -> None:
         """Click the Join / Enter button on the pre-meeting web form."""
+        await self._dismiss_media_permission_dialog()
+        await asyncio.sleep(0.3)
+
         join_selectors = [
             "button.preview-join-button",
             "button#joinBtn",
             "button[type='submit']",
-            "button:has-text('Join')",
             "button:has-text('Join Meeting')",
+            "button:has-text('Join')",
         ]
 
         # 1. Try Playwright click
+        clicked = False
         for sel in join_selectors:
             try:
                 btn = self.page.locator(sel).first
-                if await btn.is_visible(timeout=1500):
+                if await btn.is_visible(timeout=1000):
+                    is_disabled = await btn.is_disabled()
+                    if is_disabled:
+                        logger.warning("Join button '%s' is disabled.", sel)
+                        continue
                     try:
-                        await btn.click(timeout=3000)
+                        await btn.click(timeout=2000)
                     except Exception:
-                        await btn.click(force=True)
+                        await btn.click(force=True, timeout=2000)
                     logger.info("Clicked join button via Playwright: '%s'", sel)
-                    await asyncio.sleep(2.0)
-                    await self._dismiss_media_permission_dialog()
-                    return
+                    clicked = True
+                    break
             except Exception:
                 continue
 
-        # 2. JavaScript fallback click
-        try:
-            result = await self.page.evaluate("""() => {
-                const selectors = [
-                    'button.preview-join-button',
-                    'button#joinBtn',
-                    "button[type='submit']"
-                ];
-                for (const sel of selectors) {
-                    const btn = document.querySelector(sel);
-                    if (btn && btn.offsetParent !== null) {
-                        btn.disabled = false;
-                        btn.click();
-                        return 'clicked: ' + sel;
+        # 2. JavaScript fallback click (immune to CSS overlays and enables button if ready)
+        if not clicked:
+            try:
+                result = await self.page.evaluate("""() => {
+                    const selectors = [
+                        'button.preview-join-button',
+                        'button#joinBtn',
+                        "button[type='submit']"
+                    ];
+                    for (const sel of selectors) {
+                        const btn = document.querySelector(sel);
+                        if (btn && btn.offsetParent !== null) {
+                            btn.disabled = false;
+                            btn.classList.remove('zm-btn--disabled', 'disabled');
+                            btn.click();
+                            return 'clicked: ' + sel;
+                        }
                     }
-                }
-                const buttons = Array.from(document.querySelectorAll('button'));
-                const joinBtn = buttons.find(b =>
-                    b.textContent.trim().toLowerCase().startsWith('join') &&
-                    b.offsetParent !== null
-                );
-                if (joinBtn) {
-                    joinBtn.click();
-                    return 'clicked_text: ' + joinBtn.textContent.trim();
-                }
-                return 'no_join_btn';
-            }""")
-            logger.info("Join button click via JS result: %s", result)
-        except Exception as exc:
-            logger.warning("JS join click failed: %s", exc)
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    const joinBtn = buttons.find(b =>
+                        b.textContent.trim().toLowerCase().startsWith('join') &&
+                        b.offsetParent !== null
+                    );
+                    if (joinBtn) {
+                        joinBtn.disabled = false;
+                        joinBtn.classList.remove('zm-btn--disabled', 'disabled');
+                        joinBtn.click();
+                        return 'clicked_text: ' + joinBtn.textContent.trim();
+                    }
+                    return 'no_join_btn';
+                }""")
+                logger.info("Join button click via JS result: %s", result)
+            except Exception as exc:
+                logger.warning("JS join click failed: %s", exc)
 
         await asyncio.sleep(2.0)
         await self._dismiss_media_permission_dialog()
 
     async def evaluate_meeting_state(
         self,
-        max_wait_seconds: int = 30,
+        max_wait_seconds: int = 35,
         stop_event: Optional[asyncio.Event] = None,
     ) -> JobState:
         """Poll the page to determine current Zoom state using visible text and active elements."""
@@ -484,6 +597,7 @@ class ZoomMeetingIntegrator:
                 or "waiting for the host to start this meeting" in text_to_check
                 or "the meeting host will let you in soon" in text_to_check
                 or "the host will let you in shortly" in text_to_check
+                or "waiting for the host to start" in text_to_check
             ):
                 logger.info("State detected: WAITING_FOR_HOST")
                 return JobState.WAITING_FOR_HOST
@@ -496,33 +610,50 @@ class ZoomMeetingIntegrator:
                 logger.info("Meeting has ended.")
                 return JobState.COMPLETED
 
-            # Check for Active Meeting indicators
+            # Check for incorrect passcode error
+            pwd_err = await self._check_passcode_error()
+            if pwd_err:
+                logger.warning("Zoom passcode rejected: %s", pwd_err)
+                raise ZoomAccessError(f"Incorrect Zoom meeting passcode: {pwd_err}. Please check the passcode and try again.")
+
+            # PRE-JOIN SCREEN GUARD:
+            # While the pre-join form or join button is still visible, we are NOT yet in the meeting!
+            is_prejoin = await self._is_prejoin_visible()
+            if is_prejoin:
+                # If stuck on pre-join after 4 seconds, retry clicking the join button
+                if elapsed >= 4 and elapsed % 4 == 0:
+                    logger.info("Pre-join screen still active; re-attempting join button submission...")
+                    await self._click_join_button()
+                # Do NOT evaluate in-meeting selectors while pre-join form is visible
+                await asyncio.sleep(step)
+                elapsed += step
+                continue
+
+            # Genuine In-Meeting Selectors (Pre-join screen is gone!)
             in_meeting_selectors = [
                 "button:has-text('Join Audio by Computer')",
                 ".join-audio-by-computer",
                 "button:has-text('Computer Audio')",
                 "button:has-text('Join Audio')",
+                "button:has-text('Leave Meeting')",
                 "button:has-text('Leave')",
-                "button[aria-label*='Leave' i]",
+                "button.leave-meeting-options__btn",
                 ".footer__leave-btn",
                 "#meeting-screen",
                 ".meeting-app",
+                "#foot-bar",
+                ".footer-bar",
+                ".footer-button-base",
+                "button[aria-label*='mute my microphone' i]",
+                "button[aria-label*='unmute my microphone' i]",
+                "button[aria-label*='start video' i]",
+                "button[aria-label*='stop video' i]",
+                "button[aria-label*='Share Screen' i]",
+                "button[aria-label*='Open participants list' i]",
+                "button[aria-label*='open chat window' i]",
                 ".gallery-video-container",
                 ".speaker-bar-container",
                 "canvas.video-canvas",
-                "canvas",
-                "#footer",
-                ".footer",
-                "button[aria-label*='Mute' i]",
-                "button[aria-label*='Audio' i]",
-                "button[aria-label*='Share Screen' i]",
-                "button[aria-label*='Participants' i]",
-                "button:has-text('Participants')",
-                "button[aria-label*='Chat' i]",
-                "button:has-text('Chat')",
-                "button[aria-label*='Reactions' i]",
-                ".video-avatar",
-                ".main-layout",
             ]
 
             for sel in in_meeting_selectors:
@@ -539,9 +670,8 @@ class ZoomMeetingIntegrator:
             # Check if join form has disappeared and URL indicates active session
             try:
                 curr_url = getattr(self.page, "url", "")
-                if "/wc/" in curr_url:
-                    join_form_visible = await self.page.locator("button.preview-join-button, button#joinBtn, #input-for-name").first.is_visible(timeout=200)
-                    if not join_form_visible and elapsed >= 3:
+                if "/wc/" in curr_url and elapsed >= 4:
+                    if not await self._is_prejoin_visible():
                         logger.info("Pre-join form disappeared on web client URL. Confirmed active meeting.")
                         await self._connect_computer_audio()
                         await self._dismiss_recording_disclaimer()
@@ -551,6 +681,10 @@ class ZoomMeetingIntegrator:
 
             await asyncio.sleep(step)
             elapsed += step
+
+        # If loop finished and pre-join is still visible, fail explicitly rather than assuming recording
+        if await self._is_prejoin_visible():
+            raise ZoomNavigationError("Unable to enter meeting: Stuck on pre-join preview screen. Please verify meeting passcode and access settings.")
 
         logger.info("State polling completed. Direct meeting confirmed.")
         return JobState.RECORDING
