@@ -108,12 +108,12 @@ def validate_and_parse_zoom_url(
         if not ALLOWED_ZOOM_DOMAIN_PATTERN.match(hostname):
             raise InvalidZoomURLError(f"Unable to resolve host '{hostname}'. Verify network connection.")
 
-    # Parse meeting ID from path (supports /j/{id}, /wc/{id}/join, /wc/join/{id})
+    # Parse meeting ID from path (supports /j/{id}, /w/{id}, /wc/{id}/join, /wc/join/{id})
     path = parsed.path.rstrip("/")
     meeting_id = None
 
-    # Matches /j/123456789 or /wc/123456789/join or /wc/join/123456789
-    j_match = re.search(r"/(?:j|wc(?:/join)?)/(\d{9,11})", path)
+    # Matches /j/123456789, /w/123456789, /wc/123456789/join, /wc/join/123456789
+    j_match = re.search(r"/(?:j|w|wc(?:/join)?)/(\d{9,11})", path)
     if j_match:
         meeting_id = j_match.group(1)
     else:
@@ -137,10 +137,19 @@ def validate_and_parse_zoom_url(
 
     # Generate standardized Zoom Web Client Join URL
     # Format: https://app.zoom.us/wc/join/{meeting_id}
-    # Passcode will be provided programmatically to the web client input
-    normalized_join_url = f"https://app.zoom.us/wc/join/{meeting_id}"
+    # Preserve credentials and attendee tokens (e.g. tk=... for webinars)
+    from urllib.parse import urlencode
+    query_params = {}
     if passcode:
-        normalized_join_url += f"?pwd={passcode}"
+        query_params["pwd"] = passcode
+    if "tk" in qs and qs["tk"]:
+        query_params["tk"] = qs["tk"][0].strip()
+    if "uname" in qs and qs["uname"]:
+        query_params["uname"] = qs["uname"][0].strip()
+
+    normalized_join_url = f"https://app.zoom.us/wc/join/{meeting_id}"
+    if query_params:
+        normalized_join_url += f"?{urlencode(query_params)}"
 
     return normalized_join_url, meeting_id, passcode
 

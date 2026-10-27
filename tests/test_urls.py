@@ -51,6 +51,15 @@ def test_valid_zoom_urls():
     assert pwd6 == "mypass123"
     assert "pwd=mypass123" in norm6
 
+    # Webinar URL with attendee token tk and passcode
+    url7 = "https://us06web.zoom.us/w/88968044884?tk=abc123token&pwd=webinarpwd"
+    norm7, mid7, pwd7 = validate_and_parse_zoom_url(url7)
+    assert mid7 == "88968044884"
+    assert pwd7 == "webinarpwd"
+    assert "https://app.zoom.us/wc/join/88968044884" in norm7
+    assert "tk=abc123token" in norm7
+    assert "pwd=webinarpwd" in norm7
+
 
 def test_invalid_domains():
     """Ensure non-Zoom domains are rejected."""
