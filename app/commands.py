@@ -31,6 +31,7 @@ from app.login_session import get_login_session_manager
 from app.models import JobState
 from app.security import InvalidZoomURLError, SSRFAttemptError, validate_and_parse_zoom_url
 from app.storage import get_storage_provider
+from app.zoom_oauth import get_zoom_oauth_service
 
 logger = logging.getLogger("zoom_recorder.commands")
 
@@ -123,75 +124,118 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 @authorized_telegram_user_only
 async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /login command: generate a secure one-time mobile URL to authenticate Zoom."""
+    """Handle /login command: generate a secure Zoom OAuth 2.0 authorization URL."""
+    from app.zoom_oauth import get_zoom_oauth_service
     tg_user = update.effective_user
     db_user = await get_or_create_user(telegram_id=tg_user.id)
     settings = get_settings()
+    oauth_service = get_zoom_oauth_service()
 
-    notifier = getattr(job_manager, "notifier", None)
-    login_mgr = get_login_session_manager(notifier=notifier)
-    session = login_mgr.create_session(telegram_id=tg_user.id, user_id=db_user.id)
+    if not oauth_service.is_configured():
+        redirect_uri = settings.zoom_oauth_redirect_uri
+        await update.effective_message.reply_text(
+            text=(
+                "🔐 *Zoom OAuth 2.0 Configuration Required*\n\n"
+                "Official Zoom OAuth 2.0 authorization requires setting up your Zoom App in the Zoom Marketplace:\n\n"
+                "1. Go to [Zoom App Marketplace](https://marketplace.zoom.us/develop/create) -> Create a **General App**.\n"
+                f"2. Add your **Redirect URL for OAuth**:\n   `{redirect_uri}`\n"
+                "3. Add Scope: `user:read` (User Profile Identity).\n"
+                "4. Copy your **Client ID** and **Client Secret** into your environment or `.env`:\n"
+                "   • `ZOOM_CLIENT_ID=<Your_Client_ID>`\n"
+                "   • `ZOOM_CLIENT_SECRET=<Your_Client_Secret>`\n\n"
+                "_Once configured, run `/login` to authorize from your phone with 1 tap!_"
+            ),
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+        return
 
-    portal_url = f"{settings.effective_public_url}/login?token={session.token}"
-
-    # Also compute LAN IP URL for local testing from mobile device on same Wi-Fi
-    import socket
-    lan_ip = None
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        lan_ip = s.getsockname()[0]
-        s.close()
-    except Exception:
-        pass
-
-    lan_url = f"http://{lan_ip}:{settings.effective_port}/login?token={session.token}" if lan_ip and lan_ip != "127.0.0.1" else None
+    auth_url, state = oauth_service.generate_authorization_url(tg_user.id)
+    if not auth_url:
+        await update.effective_message.reply_text(
+            "⚠️ Unable to generate Zoom OAuth authorization URL. Please verify Zoom OAuth configuration.",
+            parse_mode="Markdown",
+        )
+        return
 
     # Telegram API strictly rejects localhost and non-HTTPS in InlineKeyboardButton URL
-    is_https = portal_url.startswith("https://") and not any(
-        h in portal_url.lower() for h in ("localhost", "127.0.0.1", "0.0.0.0")
+    is_https = auth_url.startswith("https://") and not any(
+        h in auth_url.lower() for h in ("localhost", "127.0.0.1", "0.0.0.0")
     )
 
     keyboard = []
     if is_https:
-        keyboard.append([InlineKeyboardButton("📱 Open Mobile Login Portal", url=portal_url)])
+        keyboard.append([InlineKeyboardButton("🔗 Connect with Zoom (OAuth 2.0)", url=auth_url)])
     keyboard.append([InlineKeyboardButton("👤 View Account Status", callback_data="cmd_account")])
 
     text = (
-        "🔐 *One-Time Zoom Login Portal*\n\n"
-        "Connect your Zoom account securely without operating a computer:\n\n"
-    )
-    if is_https:
-        text += f"Tap the button below or open this link:\n👉 {portal_url}\n\n"
-    else:
-        text += f"Open this link in your browser to sign in:\n👉 {portal_url}\n\n"
-        if lan_url:
-            text += f"📱 *From Phone (Same Wi-Fi):*\n👉 {lan_url}\n\n"
-
-    text += (
-        "• *Zero Password in Chat:* Your password is never sent through Telegram.\n"
-        "• *Cloud Browser Login:* Chromium signs in on Zoom and captures only encrypted cookies.\n"
-        "• *AES-256 Storage:* Your session is encrypted at rest and isolated to your account.\n"
-        "• *Automatic Reuse:* Future `/join` requests will automatically join as your authenticated account!\n\n"
-        "⏱️ _This single-use portal link expires in 10 minutes._"
+        "🔐 *Official Zoom OAuth 2.0 Login*\n\n"
+        "Connect your Zoom account securely from your phone using Zoom's official OAuth authorization:\n\n"
+        f"👉 [**Tap Here to Authorize with Zoom**]({auth_url})\n\n"
+        "• *Official OAuth 2.0:* Authorize directly on Zoom with Google, Apple, SSO, or Zoom credentials.\n"
+        "• *Zero Password in Chat:* Your password and MFA are never handled by the bot.\n"
+        "• *Minimal Scope:* Only requests user identity (`user:read`).\n"
+        "• *AES-256 Storage:* Authorized tokens are stored with AES-256 Fernet encryption at rest.\n"
+        "• *Automatic Token Refresh:* Session remains active without manual re-login.\n\n"
+        "⏱️ _This single-use authorization link expires in 15 minutes._"
     )
 
     await update.effective_message.reply_text(
         text=text,
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
+        disable_web_page_preview=True,
     )
 
 
 @authorized_telegram_user_only
 async def cmd_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /account command: display connection status and session health without revealing secrets."""
+    import time
+    from app.zoom_oauth import get_zoom_oauth_service
     tg_user = update.effective_user
     db_user = await get_or_create_user(telegram_id=tg_user.id)
     settings = get_settings()
 
     session_mgr = PersistentZoomSessionManager()
-    is_valid, validation_msg = session_mgr.validate_user_session(db_user.id)
+    oauth_tokens = session_mgr.load_oauth_tokens(tg_user.id) or session_mgr.load_oauth_tokens(db_user.id)
+    oauth_service = get_zoom_oauth_service()
+
+    is_valid = False
+    validation_msg = "Not Connected"
+    user_name = None
+    account_id = None
+    expires_in_mins = None
+
+    if oauth_tokens:
+        user_profile = oauth_tokens.get("user_profile") or {}
+        first_name = user_profile.get("first_name", "")
+        last_name = user_profile.get("last_name", "")
+        if first_name or last_name:
+            user_name = f"{first_name} {last_name}".strip()
+        account_id = user_profile.get("account_id")
+
+        # Check token validity or attempt auto-refresh
+        valid_access_token = await oauth_service.get_valid_token(tg_user.id)
+        if valid_access_token:
+            is_valid = True
+            validation_msg = "Active & Auto-Refreshing"
+            fresh_tokens = (
+                session_mgr.load_oauth_tokens(tg_user.id)
+                or session_mgr.load_oauth_tokens(db_user.id)
+                or oauth_tokens
+            )
+            rem_secs = max(0, int(fresh_tokens.get("expires_at", 0) - time.time()))
+            expires_in_mins = rem_secs // 60
+        else:
+            is_valid = False
+            validation_msg = "Expired or Revoked"
+    else:
+        # Fallback check on legacy browser session if any
+        is_legacy_valid, _ = session_mgr.validate_user_session(db_user.id)
+        if is_legacy_valid:
+            is_valid = True
+            validation_msg = "Legacy Browser Session"
 
     status_str = db_user.zoom_session_status or "DISCONNECTED"
     if status_str == "CONNECTED" and not is_valid:
@@ -215,23 +259,36 @@ async def cmd_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "👤 *Zoom Account Connection Status*\n\n"
         f"• *Status:* `{status_badge}`\n"
         f"• *Zoom Account:* `{db_user.zoom_email or 'None'}`\n"
+    )
+    if user_name:
+        text += f"• *Authorized User:* `{user_name}`\n"
+    if account_id:
+        text += f"• *Account ID:* `{account_id}`\n"
+
+    text += (
         f"• *Connected Since:* `{date_str}`\n"
-        f"• *Session Health:* `{'Active & Valid' if is_valid else (validation_msg or 'No Session')}`\n"
-        f"• *Storage Encryption:* `Fernet AES-256`\n"
+        f"• *OAuth Token Health:* `{validation_msg}`\n"
+    )
+    if expires_in_mins is not None:
+        text += f"• *Token Auto-Refresh:* `Within ~{expires_in_mins} mins (Automatic)`\n"
+
+    text += (
+        "• *Authorization Type:* `Official Zoom OAuth 2.0 (user:read)`\n"
+        "• *Storage Encryption:* `Fernet AES-256`\n"
         f"• *Persistence Tier:* _{storage_mode}_\n\n"
     )
 
     buttons = []
     if status_str == "CONNECTED" and is_valid:
-        text += "✅ _Your session is active. Future /join calls will automatically reuse it._"
+        text += "✅ _Your Zoom account is authorized. Future /join calls will automatically reuse it._"
         buttons.append([
-            InlineKeyboardButton("🔄 Re-authenticate", callback_data="cmd_login"),
+            InlineKeyboardButton("🔄 Refresh Status", callback_data="cmd_account"),
             InlineKeyboardButton("🚪 Disconnect Account", callback_data="cmd_logout"),
         ])
     else:
-        text += "👉 _To connect your Zoom account, tap below to open the mobile login portal._"
+        text += "👉 _To connect your Zoom account, tap below to authorize via official Zoom OAuth 2.0._"
         buttons.append([
-            InlineKeyboardButton("🔐 Connect Zoom Account", callback_data="cmd_login"),
+            InlineKeyboardButton("🔐 Connect with Zoom (OAuth 2.0)", callback_data="cmd_login"),
         ])
 
     keyboard = InlineKeyboardMarkup(buttons)
@@ -240,17 +297,19 @@ async def cmd_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 @authorized_telegram_user_only
 async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /logout command: clear saved encrypted Zoom session."""
+    """Handle /logout command: clear saved encrypted Zoom OAuth tokens and session."""
     tg_user = update.effective_user
     db_user = await get_or_create_user(telegram_id=tg_user.id)
 
     session_mgr = PersistentZoomSessionManager()
+    await session_mgr.clear_oauth_tokens_async(tg_user.id)
+    await session_mgr.clear_oauth_tokens_async(db_user.id)
     await session_mgr.clear_session_state_async(db_user.id)
     await disconnect_user_zoom(tg_user.id)
 
     await update.effective_message.reply_text(
         "🚪 *Zoom Account Disconnected*\n\n"
-        "Your encrypted session tokens have been permanently deleted from storage.\n"
+        "Your encrypted Zoom OAuth tokens and session data have been permanently deleted.\n"
         "Future meeting recordings will join as a guest participant using your configured bot name.\n\n"
         "You can reconnect anytime using `/login`.",
         parse_mode="Markdown",

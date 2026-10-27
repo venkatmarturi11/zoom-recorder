@@ -32,6 +32,7 @@ def test_create_health_app():
     assert "/" in routes
     assert "/health" in routes
     assert "/ping" in routes
+    assert "/oauth/callback" in routes
     assert "/login" in routes
     assert "/api/auth/submit" in routes
     assert "/api/auth/mfa" in routes

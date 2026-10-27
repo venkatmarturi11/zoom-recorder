@@ -150,14 +150,22 @@ async def update_user_zoom_session(
         stmt = select(User).where(User.telegram_id == telegram_id)
         result = await session.execute(stmt)
         user = result.scalar_one_or_none()
-        if user:
-            user.zoom_session_status = status
-            if zoom_email is not None:
-                user.zoom_email = zoom_email
-            if status == "CONNECTED":
-                user.zoom_connected_at = utc_now()
-            await session.commit()
-            await session.refresh(user)
+        if not user:
+            user = User(
+                telegram_id=telegram_id,
+                username=None,
+                first_name=None,
+                is_admin=False,
+                is_allowed=True,
+            )
+            session.add(user)
+        user.zoom_session_status = status
+        if zoom_email is not None:
+            user.zoom_email = zoom_email
+        if status == "CONNECTED":
+            user.zoom_connected_at = utc_now()
+        await session.commit()
+        await session.refresh(user)
         return user
 
 

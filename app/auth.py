@@ -198,3 +198,86 @@ class PersistentZoomSessionManager:
             return False, "No session found."
         return validate_session_state(state)
 
+    # -----------------------------------------------------------------------
+    # Official Zoom OAuth 2.0 Encrypted Token Storage
+    # -----------------------------------------------------------------------
+
+    def _get_user_oauth_path(self, user_id: int) -> Path:
+        """Isolated path for a user's encrypted OAuth tokens."""
+        return self.session_dir / f"oauth_user_{user_id}.enc"
+
+    def _get_s3_oauth_key(self, user_id: int) -> str:
+        """S3 storage key for persistent cloud OAuth backup."""
+        return f"oauth/oauth_user_{user_id}.enc"
+
+    def save_oauth_tokens(self, user_id: int, token_data: Dict[str, Any]) -> None:
+        """Encrypt and securely save Zoom OAuth 2.0 access & refresh tokens at rest."""
+        raw_json = json.dumps(token_data)
+        encrypted_str = self.storage.encrypt_data(raw_json)
+        file_path = self._get_user_oauth_path(user_id)
+        file_path.write_text(encrypted_str, encoding="utf-8")
+        logger.info("Encrypted Zoom OAuth tokens saved for user %d", user_id)
+
+    async def save_oauth_tokens_async(self, user_id: int, token_data: Dict[str, Any]) -> None:
+        """Save encrypted OAuth tokens locally and sync to S3/Cloudflare R2 if configured."""
+        self.save_oauth_tokens(user_id, token_data)
+        if self.settings.storage_provider == "s3":
+            try:
+                from app.storage import get_storage_provider
+                provider = get_storage_provider()
+                file_path = self._get_user_oauth_path(user_id)
+                s3_key = self._get_s3_oauth_key(user_id)
+                await provider.upload_file(file_path, s3_key)
+                logger.info("Backed up encrypted Zoom OAuth tokens to S3: %s", s3_key)
+            except Exception as exc:
+                logger.warning("Could not sync OAuth tokens to S3 for user %d: %s", user_id, exc)
+
+    def load_oauth_tokens(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """Load and decrypt Zoom OAuth tokens from persistent storage."""
+        file_path = self._get_user_oauth_path(user_id)
+        if not file_path.exists():
+            return None
+        try:
+            encrypted_str = file_path.read_text(encoding="utf-8")
+            decrypted_str = self.storage.decrypt_data(encrypted_str)
+            return json.loads(decrypted_str)
+        except Exception as exc:
+            logger.error("Failed to decrypt or load OAuth tokens for user %d: %s", user_id, exc)
+            return None
+
+    async def load_oauth_tokens_async(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """Load persistent OAuth tokens, restoring from S3/Cloudflare R2 if local disk was wiped."""
+        file_path = self._get_user_oauth_path(user_id)
+        if not file_path.exists() and self.settings.storage_provider == "s3":
+            try:
+                from app.storage import get_storage_provider
+                provider = get_storage_provider()
+                s3_key = self._get_s3_oauth_key(user_id)
+                downloaded = await provider.download_file(s3_key, file_path)
+                if downloaded:
+                    logger.info("Restored encrypted Zoom OAuth tokens from S3 for user %d", user_id)
+            except Exception as exc:
+                logger.debug("S3 OAuth restore failed for user %d: %s", user_id, exc)
+
+        return self.load_oauth_tokens(user_id)
+
+    def clear_oauth_tokens(self, user_id: int) -> None:
+        """Remove saved OAuth tokens on logout or authorization revocation."""
+        file_path = self._get_user_oauth_path(user_id)
+        if file_path.exists():
+            file_path.unlink()
+            logger.info("Cleared local OAuth tokens for user %d", user_id)
+
+    async def clear_oauth_tokens_async(self, user_id: int) -> None:
+        """Clear local OAuth tokens and delete backup from S3/Cloudflare R2."""
+        self.clear_oauth_tokens(user_id)
+        if self.settings.storage_provider == "s3":
+            try:
+                from app.storage import get_storage_provider
+                provider = get_storage_provider()
+                s3_key = self._get_s3_oauth_key(user_id)
+                await provider.delete_file(s3_key)
+                logger.info("Deleted encrypted Zoom OAuth tokens from S3: %s", s3_key)
+            except Exception as exc:
+                logger.debug("Failed to delete S3 OAuth key for user %d: %s", user_id, exc)
+

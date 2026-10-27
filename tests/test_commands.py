@@ -289,30 +289,39 @@ async def test_handle_message_menu_button_tap(mock_telegram_update):
 
 @pytest.mark.asyncio
 async def test_cmd_login_generates_portal_url(mock_telegram_update, monkeypatch):
-    """Verify /login generates an encrypted one-time mobile authentication link."""
+    """Verify /login generates a secure Zoom OAuth 2.0 authorization link."""
     from app.commands import cmd_login
     from app.config import get_settings
 
-    # 1. Localhost HTTP environment (URL in message text to avoid Telegram API wrong http url error)
+    # 1. Unconfigured credentials: setup guide provided
+    settings = get_settings()
+    monkeypatch.setattr(settings, "zoom_client_id", None)
+    monkeypatch.setattr(settings, "zoom_client_secret", None)
     update, context = mock_telegram_update(user_id=1001)
     await cmd_login(update, context)
     update.effective_message.reply_text.assert_called_once()
     reply = _extract_reply_text(update.effective_message.reply_text.call_args)
-    assert "One-Time Zoom Login Portal" in reply
-    assert "Zero Password in Chat" in reply
-    assert "/login?token=" in reply
+    assert "Zoom OAuth 2.0 Configuration Required" in reply
+    assert "ZOOM_CLIENT_ID" in reply
 
-    # 2. Production HTTPS environment (Inline button attached)
-    settings = get_settings()
+    # 2. Configured credentials: OAuth authorization URL generated
+    monkeypatch.setattr(settings, "zoom_client_id", "CLIENT_ID_TEST")
+    monkeypatch.setattr(settings, "zoom_client_secret", "CLIENT_SECRET_TEST")
     monkeypatch.setattr(settings, "public_app_url", "https://recorder-bot.onrender.com")
-    update_https, context_https = mock_telegram_update(user_id=1001)
-    await cmd_login(update_https, context_https)
-    _, kwargs = update_https.effective_message.reply_text.call_args
+
+    update_oauth, context_oauth = mock_telegram_update(user_id=1001)
+    await cmd_login(update_oauth, context_oauth)
+    _, kwargs = update_oauth.effective_message.reply_text.call_args
+    reply_oauth = kwargs.get("text", "")
+    assert "Official Zoom OAuth 2.0 Login" in reply_oauth
+    assert "https://zoom.us/oauth/authorize" in reply_oauth
+    assert "CLIENT_ID_TEST" in reply_oauth
+
     markup = kwargs.get("reply_markup")
     assert markup is not None
     portal_btn = markup.inline_keyboard[0][0]
-    assert "Open Mobile Login Portal" in portal_btn.text
-    assert "https://recorder-bot.onrender.com/login?token=" in portal_btn.url
+    assert "Connect with Zoom (OAuth 2.0)" in portal_btn.text
+    assert "https://zoom.us/oauth/authorize" in portal_btn.url
 
 
 @pytest.mark.asyncio
@@ -351,7 +360,7 @@ async def test_handle_message_login_account_buttons(mock_telegram_update):
     await handle_message(update, context)
     update.effective_message.reply_text.assert_called_once()
     reply = _extract_reply_text(update.effective_message.reply_text.call_args)
-    assert "One-Time Zoom Login Portal" in reply
+    assert "Zoom OAuth 2.0" in reply
 
     # Test My Account button
     update2, context2 = mock_telegram_update(user_id=1001, text="👤 My Account")

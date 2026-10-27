@@ -140,6 +140,20 @@ class Settings(BaseSettings):
         description="Public HTTPS URL for authentication portal and webhooks (e.g. https://my-app.onrender.com)",
     )
 
+    # Official Zoom OAuth 2.0 Authentication
+    zoom_client_id: Optional[str] = Field(
+        default=None,
+        description="Zoom App Marketplace OAuth Client ID",
+    )
+    zoom_client_secret: Optional[str] = Field(
+        default=None,
+        description="Zoom App Marketplace OAuth Client Secret",
+    )
+    zoom_oauth_scope: str = Field(
+        default="user:read",
+        description="Minimal OAuth scope genuinely required for user identity authorization",
+    )
+
     @property
     def effective_port(self) -> int:
         """Port to bind for HTTP keep-alive and webhooks (respects Render's $PORT environment variable)."""
@@ -164,6 +178,11 @@ class Settings(BaseSettings):
         if self.webhook_url:
             return self.webhook_url.rstrip("/")
         return f"http://localhost:{self.effective_port}"
+
+    @property
+    def zoom_oauth_redirect_uri(self) -> str:
+        """Official Zoom OAuth 2.0 callback URL registered in the Zoom App Marketplace."""
+        return f"{self.effective_public_url}/oauth/callback"
 
     @field_validator("allowed_telegram_user_ids", "admin_user_ids", mode="after")
     @classmethod

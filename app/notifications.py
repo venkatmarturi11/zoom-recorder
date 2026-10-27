@@ -10,15 +10,31 @@ from app.models import JobState, RecordingJob
 logger = logging.getLogger("zoom_recorder.notifications")
 
 
+_global_notification_service: Optional["NotificationService"] = None
+
+
+def get_notification_service() -> Optional["NotificationService"]:
+    """Retrieve global NotificationService instance if registered."""
+    return _global_notification_service
+
+
+def set_notification_service(service: "NotificationService") -> None:
+    """Register global NotificationService instance."""
+    global _global_notification_service
+    _global_notification_service = service
+
+
 class NotificationService:
     """Delivers asynchronous status updates and completed download links to Telegram users."""
 
     def __init__(self, bot: Optional[Bot] = None):
         self.bot = bot
         self.settings = get_settings()
+        set_notification_service(self)
 
     def set_bot(self, bot: Bot) -> None:
         self.bot = bot
+        set_notification_service(self)
 
     async def notify_job_status(
         self,

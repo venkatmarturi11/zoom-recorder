@@ -7,6 +7,7 @@ from aiohttp import web
 from app.config import get_settings
 from app.database import get_system_health_stats
 from app.login_session import get_login_session_manager
+from app.zoom_oauth import ZoomOAuthError, get_zoom_oauth_service
 
 logger = logging.getLogger("zoom_recorder.http")
 
@@ -578,12 +579,308 @@ async def handle_api_status(request: web.Request) -> web.Response:
     })
 
 
+OAUTH_SUCCESS_HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Zoom Connected &bull; Cloud Recorder</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #090d16;
+      --card-bg: rgba(22, 30, 49, 0.9);
+      --card-border: rgba(16, 185, 129, 0.25);
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --success: #10b981;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      background-image: 
+        radial-gradient(at 0% 0%, rgba(16, 185, 129, 0.2) 0px, transparent 50%),
+        radial-gradient(at 100% 100%, rgba(37, 99, 235, 0.15) 0px, transparent 50%);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .container {
+      width: 100%;
+      max-width: 440px;
+      background: var(--card-bg);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--card-border);
+      border-radius: 24px;
+      padding: 36px 28px;
+      text-align: center;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+    }
+    .badge-icon {
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 20px;
+      box-shadow: 0 10px 25px -5px rgba(16, 185, 129, 0.5);
+    }
+    .badge-icon svg { width: 34px; height: 34px; fill: white; }
+    h1 { font-size: 22px; font-weight: 700; margin-bottom: 8px; color: #f8fafc; }
+    p.desc { font-size: 14px; color: var(--text-muted); line-height: 1.6; margin-bottom: 24px; }
+    .info-card {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 14px;
+      padding: 14px 16px;
+      margin-bottom: 24px;
+      font-size: 13px;
+      color: #cbd5e1;
+      text-align: left;
+    }
+    .info-row { display: flex; justify-content: space-between; padding: 4px 0; }
+    .info-label { color: var(--text-muted); }
+    .info-val { font-weight: 600; color: #f8fafc; }
+    .close-btn {
+      display: block;
+      width: 100%;
+      padding: 14px;
+      background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+      color: white;
+      text-decoration: none;
+      border-radius: 12px;
+      font-weight: 600;
+      font-size: 15px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="badge-icon">
+      <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+    </div>
+    <h1>Zoom Account Connected</h1>
+    <p class="desc">Your Zoom account has been securely authorized via official OAuth 2.0. You can now close this tab and return to Telegram.</p>
+    <div class="info-card">
+      <div class="info-row"><span class="info-label">Account:</span><span class="info-val">{email}</span></div>
+      <div class="info-row"><span class="info-label">Status:</span><span class="info-val" style="color:#10b981;">Authorized & Active</span></div>
+      <div class="info-row"><span class="info-label">Authorization:</span><span class="info-val">OAuth 2.0 (user:read)</span></div>
+    </div>
+    <a href="https://t.me/" class="close-btn" onclick="window.close();">Return to Telegram</a>
+  </div>
+</body>
+</html>"""
+
+
+OAUTH_ERROR_HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Connection Notice &bull; Cloud Recorder</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #090d16;
+      --card-bg: rgba(22, 30, 49, 0.9);
+      --card-border: rgba(239, 68, 68, 0.25);
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .container {
+      width: 100%;
+      max-width: 440px;
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 24px;
+      padding: 36px 28px;
+      text-align: center;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+    }
+    .badge-icon {
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 20px;
+      box-shadow: 0 10px 25px -5px rgba(239, 68, 68, 0.5);
+    }
+    .badge-icon svg { width: 34px; height: 34px; fill: white; }
+    h1 { font-size: 22px; font-weight: 700; margin-bottom: 8px; }
+    p.desc { font-size: 14px; color: var(--text-muted); line-height: 1.6; margin-bottom: 24px; }
+    .btn {
+      display: block;
+      width: 100%;
+      padding: 14px;
+      background: rgba(255, 255, 255, 0.1);
+      color: white;
+      text-decoration: none;
+      border-radius: 12px;
+      font-weight: 600;
+      font-size: 15px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="badge-icon">
+      <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
+    </div>
+    <h1>{title}</h1>
+    <p class="desc">{message}</p>
+    <a href="https://t.me/" class="btn" onclick="window.close();">Return to Telegram</a>
+  </div>
+</body>
+</html>"""
+
+
+def _render_oauth_success_page(email: str) -> str:
+    return OAUTH_SUCCESS_HTML_TEMPLATE.replace("{email}", email)
+
+
+def _render_oauth_error_page(title: str, message: str) -> str:
+    return OAUTH_ERROR_HTML_TEMPLATE.replace("{title}", title).replace("{message}", message)
+
+
+async def handle_oauth_callback(request: web.Request) -> web.Response:
+    """Official Zoom OAuth 2.0 callback endpoint.
+
+    Validates state against CSRF attacks, exchanges authorization code for tokens,
+    retrieves user profile info, persists encrypted tokens at rest, and confirms via Telegram.
+    """
+    import time
+    from app.auth import PersistentZoomSessionManager
+    from app.database import update_user_zoom_session
+    from app.notifications import get_notification_service
+    from app.security import mask_email
+
+    error = request.query.get("error")
+    error_description = request.query.get("error_description", "Authorization was denied or cancelled.")
+
+    if error:
+        logger.info("Zoom OAuth authorization denied by user: %s - %s", error, error_description)
+        html = _render_oauth_error_page(
+            title="Authorization Cancelled",
+            message="You declined or cancelled the Zoom account authorization. Return to Telegram and run <code>/login</code> anytime if you wish to connect."
+        )
+        return web.Response(text=html, content_type="text/html", status=200)
+
+    code = request.query.get("code", "").strip()
+    state = request.query.get("state", "").strip()
+
+    if not code or not state:
+        logger.warning("Zoom OAuth callback missing code or state parameter.")
+        html = _render_oauth_error_page(
+            title="Missing Parameters",
+            message="The authorization callback did not include the required code or state parameter. Please run <code>/login</code> again from Telegram."
+        )
+        return web.Response(text=html, content_type="text/html", status=400)
+
+    oauth_service = get_zoom_oauth_service()
+    telegram_user_id = oauth_service.validate_and_consume_state(state)
+
+    if not telegram_user_id:
+        logger.warning("Zoom OAuth CSRF state verification failed.")
+        html = _render_oauth_error_page(
+            title="Security Verification Failed",
+            message="Invalid or expired authorization session (CSRF verification failed). Please return to Telegram and send <code>/login</code> to generate a new secure connection link."
+        )
+        return web.Response(text=html, content_type="text/html", status=403)
+
+    try:
+        # Exchange authorization code for tokens
+        token_data = await oauth_service.exchange_code_for_tokens(code)
+
+        # Retrieve user profile
+        user_profile = await oauth_service.get_user_profile(token_data["access_token"])
+        token_data["user_profile"] = user_profile
+        token_data["expires_at"] = time.time() + token_data.get("expires_in", 3600)
+        token_data["connected_at"] = time.time()
+
+        # Persist encrypted tokens
+        session_mgr = PersistentZoomSessionManager()
+        await session_mgr.save_oauth_tokens_async(telegram_user_id, token_data)
+
+        # Update database record
+        raw_email = user_profile.get("email")
+        masked = mask_email(raw_email) if raw_email else "Zoom Account"
+        await update_user_zoom_session(telegram_user_id, zoom_email=masked, status="CONNECTED")
+
+        # Notify user on Telegram
+        notifier = get_notification_service()
+        if notifier:
+            first_name = user_profile.get("first_name", "")
+            last_name = user_profile.get("last_name", "")
+            name = f"{first_name} {last_name}".strip() or "Zoom User"
+            account_id = user_profile.get("account_id") or "N/A"
+            await notifier.send_custom_message(
+                chat_id=telegram_user_id,
+                message_text=(
+                    "🎉 *Zoom Account Authorized Successfully!*\n\n"
+                    f"Your Zoom account (`{masked}`) is now connected via official Zoom OAuth 2.0.\n\n"
+                    f"• *Authorized User:* {name}\n"
+                    f"• *Account ID:* `{account_id}`\n"
+                    f"• *Status:* Active & Connected\n"
+                    f"• *Permissions:* User Identity (`user:read`)\n"
+                    f"• *Storage:* AES-256 Encrypted Session\n\n"
+                    "Your connection is active and ready for scheduled recordings."
+                ),
+            )
+
+        logger.info("Successfully connected Zoom account for user %d via official OAuth 2.0", telegram_user_id)
+        html = _render_oauth_success_page(email=masked)
+        return web.Response(text=html, content_type="text/html", status=200)
+
+    except ZoomOAuthError as exc:
+        logger.error("Zoom OAuth callback processing failed: %s", exc)
+        html = _render_oauth_error_page(
+            title="Authorization Failed",
+            message=f"Unable to complete Zoom OAuth authorization: {str(exc)}. Please try again via <code>/login</code>."
+        )
+        return web.Response(text=html, content_type="text/html", status=400)
+    except Exception as exc:
+        logger.error("Unexpected error handling Zoom OAuth callback: %s", exc, exc_info=True)
+        html = _render_oauth_error_page(
+            title="System Error",
+            message="An unexpected error occurred during authorization. Please try again."
+        )
+        return web.Response(text=html, content_type="text/html", status=500)
+
+
 def create_health_app() -> web.Application:
     """Construct aiohttp web application with health probes and login endpoints."""
     app = web.Application()
     app.router.add_get("/", handle_root)
     app.router.add_get("/health", handle_health)
     app.router.add_get("/ping", handle_root)
+    app.router.add_get("/oauth/callback", handle_oauth_callback)
     app.router.add_get("/login", handle_login_page)
     app.router.add_post("/api/auth/submit", handle_api_submit)
     app.router.add_post("/api/auth/mfa", handle_api_mfa)
