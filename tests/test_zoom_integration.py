@@ -170,3 +170,37 @@ async def test_prejoin_guard_prevents_false_recording():
         await integrator.evaluate_meeting_state(max_wait_seconds=2)
 
 
+@pytest.mark.asyncio
+async def test_prejoin_loop_detects_passcode_requirement():
+    """Verify that if passcode input appears during pre-join loop, ZoomAccessError is raised."""
+    from app.zoom_integration import ZoomAccessError
+    mock_page = MagicMock()
+    mock_page.inner_text = AsyncMock(return_value="Meeting Passcode Your Name Join")
+    mock_page.content = AsyncMock(return_value="<html><body>Meeting Passcode</body></html>")
+    mock_page.evaluate = AsyncMock(return_value=None)
+
+    # Passcode field is visible
+    mock_pwd_loc = MagicMock()
+    mock_pwd_loc.is_visible = AsyncMock(return_value=True)
+
+    def mock_locator(sel):
+        loc = MagicMock()
+        if "pwd" in sel or "passcode" in sel or "input-for-name" in sel or "preview-join-button" in sel:
+            loc.first = mock_pwd_loc
+        else:
+            loc_first = MagicMock()
+            loc_first.is_visible = AsyncMock(return_value=False)
+            loc.first = loc_first
+        return loc
+
+    mock_page.locator = mock_locator
+    integrator = ZoomMeetingIntegrator(mock_page)
+
+    with pytest.raises(ZoomAccessError, match="requires a passcode"):
+        await integrator.evaluate_meeting_state(
+            display_name="TestBot",
+            passcode=None,
+            max_wait_seconds=4,
+        )
+
+

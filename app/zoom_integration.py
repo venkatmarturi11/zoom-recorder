@@ -52,7 +52,7 @@ class ZoomMeetingIntegrator:
         try:
             # 1. Navigate to Zoom meeting URL
             await self.page.goto(join_url, timeout=timeout_ms, wait_until="domcontentloaded")
-            await asyncio.sleep(2.5)  # Allow initial scripts to bootstrap
+            await asyncio.sleep(1.5)  # Allow initial scripts to bootstrap
 
             if stop_event and stop_event.is_set():
                 return JobState.CANCELLED
@@ -65,19 +65,22 @@ class ZoomMeetingIntegrator:
             if early_state is not None:
                 return early_state
 
-            # 4. Dismiss any Cookie Consent or Privacy banners
+            # 4. Wait for pre-join form or active meeting UI to render
+            await self._wait_for_prejoin_or_meeting(timeout_ms=10000)
+
+            # 5. Dismiss any Cookie Consent or Privacy banners
             await self._dismiss_cookie_dialogs()
 
-            # 5. Dismiss Zoom's media permission dialog (pepc) and purge overlays
+            # 6. Dismiss Zoom's media permission dialog (pepc) and purge overlays
             await self._dismiss_media_permission_dialog()
 
             if stop_event and stop_event.is_set():
                 return JobState.CANCELLED
 
-            # 6. Input Participant Name if name input field is visible
+            # 7. Input Participant Name if name input field is visible
             await self._fill_participant_name(display_name)
 
-            # 7. Check if passcode field is prompted
+            # 8. Check if passcode field is prompted
             pwd_field_visible = await self._is_passcode_field_visible()
             if pwd_field_visible:
                 if passcode:
@@ -89,17 +92,22 @@ class ZoomMeetingIntegrator:
                         "containing the '?pwd=...' parameter, or supply the passcode (e.g., /join <meeting_id> <passcode>)."
                     )
 
-            # 8. Accept any Terms of Service / Privacy checkboxes if present
+            # 9. Accept any Terms of Service / Privacy checkboxes if present
             await self._handle_terms_checkbox()
 
             if stop_event and stop_event.is_set():
                 return JobState.CANCELLED
 
-            # 9. Click the 'Join' button
+            # 10. Click the 'Join' button
             await self._click_join_button()
 
-            # 10. Evaluate landing state
-            return await self.evaluate_meeting_state(max_wait_seconds=35, stop_event=stop_event)
+            # 11. Evaluate landing state
+            return await self.evaluate_meeting_state(
+                display_name=display_name,
+                passcode=passcode,
+                max_wait_seconds=35,
+                stop_event=stop_event,
+            )
 
         except PlaywrightTimeoutError as exc:
             logger.error("Navigation timeout while joining Zoom meeting: %s", exc)
@@ -152,6 +160,28 @@ class ZoomMeetingIntegrator:
             logger.debug("Non-fatal check on launcher page: %s", exc)
 
         return False
+
+    async def _wait_for_prejoin_or_meeting(self, timeout_ms: int = 12000) -> None:
+        """Wait until pre-join form, launcher, or active meeting UI appears."""
+        target_selectors = [
+            "#input-for-name",
+            "#input-for-pwd",
+            "button.preview-join-button",
+            ".preview-meeting-info",
+            "a:has-text('Join from Your Browser')",
+            "button:has-text('Launch Meeting')",
+            "#meeting-screen",
+            ".meeting-app",
+            ".footer-bar",
+            "#foot-bar",
+        ]
+        if hasattr(self.page, "wait_for_selector"):
+            try:
+                selector_query = ", ".join(target_selectors)
+                await self.page.wait_for_selector(selector_query, timeout=timeout_ms, state="attached")
+                await asyncio.sleep(0.5)
+            except Exception as exc:
+                logger.debug("Wait for initial pre-join or meeting UI finished/timed out: %s", exc)
 
     async def _check_immediate_errors(self) -> Optional[JobState]:
         """Check for immediate error states like invalid meeting links."""
@@ -282,17 +312,39 @@ class ZoomMeetingIntegrator:
     async def _check_passcode_error(self) -> Optional[str]:
         """Check if an incorrect passcode error message is visible."""
         try:
-            err_loc = self.page.locator("#error-for-pwd, .preview-meeting-info__field-error").first
+            err_loc = self.page.locator("#error-for-pwd, .preview-meeting-info__field-error, .zm-form-item__error").first
             if await err_loc.is_visible(timeout=150):
                 txt = (await err_loc.inner_text()).strip()
                 if txt:
                     return txt
-            body_text = (await self.page.inner_text("body")).lower()
-            if "incorrect password" in body_text or "wrong meeting passcode" in body_text:
+        except Exception:
+            pass
+
+        try:
+            body_text = ""
+            if hasattr(self.page, "inner_text"):
+                body_text = (await self.page.inner_text("body")).lower()
+            if (
+                "incorrect password" in body_text
+                or "wrong meeting passcode" in body_text
+                or "incorrect passcode" in body_text
+                or "meeting passcode is incorrect" in body_text
+            ):
                 return "Incorrect meeting passcode."
         except Exception:
             pass
         return None
+
+    async def _get_input_value(self, selector: str) -> str:
+        """Safely fetch current text value of an input field."""
+        try:
+            loc = self.page.locator(selector).first
+            if await loc.is_visible(timeout=150):
+                val = await loc.input_value()
+                return (val or "").strip()
+        except Exception:
+            pass
+        return ""
 
     async def _dismiss_recording_disclaimer(self) -> None:
         """Dismiss Zoom's 'This meeting is being recorded' or consent modal."""
@@ -530,6 +582,8 @@ class ZoomMeetingIntegrator:
 
     async def evaluate_meeting_state(
         self,
+        display_name: str = "",
+        passcode: Optional[str] = None,
         max_wait_seconds: int = 35,
         stop_event: Optional[asyncio.Event] = None,
     ) -> JobState:
@@ -620,10 +674,34 @@ class ZoomMeetingIntegrator:
             # While the pre-join form or join button is still visible, we are NOT yet in the meeting!
             is_prejoin = await self._is_prejoin_visible()
             if is_prejoin:
-                # If stuck on pre-join after 4 seconds, retry clicking the join button
-                if elapsed >= 4 and elapsed % 4 == 0:
+                # 1. Check if meeting requires a passcode
+                if await self._is_passcode_field_visible():
+                    if not passcode:
+                        logger.warning("Meeting requires a passcode, but none was provided.")
+                        raise ZoomAccessError(
+                            "This Zoom meeting requires a passcode. Please provide the meeting invite link "
+                            "containing the '?pwd=...' parameter, or supply the passcode (e.g., /join <meeting_id> <passcode>)."
+                        )
+                    # If passcode provided, ensure field is not blank
+                    curr_pwd = await self._get_input_value("#input-for-pwd")
+                    if not curr_pwd:
+                        await self._fill_passcode(passcode)
+
+                # 2. Check if name field is blank
+                if display_name:
+                    curr_name = await self._get_input_value("#input-for-name")
+                    if not curr_name:
+                        await self._fill_participant_name(display_name)
+
+                # 3. Dismiss blocking overlays & accept terms
+                await self._dismiss_media_permission_dialog()
+                await self._handle_terms_checkbox()
+
+                # 4. If stuck on pre-join after 3 seconds, retry clicking the join button
+                if elapsed >= 3 and elapsed % 3 == 0:
                     logger.info("Pre-join screen still active; re-attempting join button submission...")
                     await self._click_join_button()
+
                 # Do NOT evaluate in-meeting selectors while pre-join form is visible
                 await asyncio.sleep(step)
                 elapsed += step

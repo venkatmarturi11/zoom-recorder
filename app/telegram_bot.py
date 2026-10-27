@@ -3,10 +3,12 @@
 import asyncio
 import logging
 from typing import Optional
+from telegram import Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
+    ContextTypes,
     MessageHandler,
     filters,
 )
@@ -102,7 +104,32 @@ class TelegramBotApp:
         for handler in handlers:
             self.app.add_handler(handler)
 
-        logger.info("Successfully registered %d Telegram handlers.", len(handlers))
+        self.app.add_error_handler(self._on_error)
+
+        logger.info("Successfully registered %d Telegram handlers with global error handling.", len(handlers))
+
+    async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Global error handler to capture, log, and gracefully inform users of failures."""
+        error = context.error
+        logger.error("Unhandled Telegram error: %s", error, exc_info=error)
+        if isinstance(update, Update) and update.effective_message:
+            try:
+                err_text = str(error)
+                if "wrong http url" in err_text.lower():
+                    await update.effective_message.reply_text(
+                        "⚠️ *URL Notice:* Unable to attach direct button for non-HTTPS URL. "
+                        "Please use the direct link provided in the message.",
+                        parse_mode="Markdown",
+                    )
+                elif "conflict" in err_text.lower():
+                    pass  # Multi-instance polling conflict
+                else:
+                    await update.effective_message.reply_text(
+                        f"⚠️ An error occurred while processing your request: `{err_text[:200]}`",
+                        parse_mode="Markdown",
+                    )
+            except Exception:
+                pass
 
     async def start(self) -> None:
         """Start the bot in polling or webhook mode, alongside the UptimeRobot keep-alive HTTP server."""

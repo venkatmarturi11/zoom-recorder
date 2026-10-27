@@ -288,23 +288,31 @@ async def test_handle_message_menu_button_tap(mock_telegram_update):
 
 
 @pytest.mark.asyncio
-async def test_cmd_login_generates_portal_url(mock_telegram_update):
+async def test_cmd_login_generates_portal_url(mock_telegram_update, monkeypatch):
     """Verify /login generates an encrypted one-time mobile authentication link."""
     from app.commands import cmd_login
+    from app.config import get_settings
+
+    # 1. Localhost HTTP environment (URL in message text to avoid Telegram API wrong http url error)
     update, context = mock_telegram_update(user_id=1001)
     await cmd_login(update, context)
     update.effective_message.reply_text.assert_called_once()
     reply = _extract_reply_text(update.effective_message.reply_text.call_args)
     assert "One-Time Zoom Login Portal" in reply
     assert "Zero Password in Chat" in reply
+    assert "/login?token=" in reply
 
-    # Check button URL
-    _, kwargs = update.effective_message.reply_text.call_args
+    # 2. Production HTTPS environment (Inline button attached)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "public_app_url", "https://recorder-bot.onrender.com")
+    update_https, context_https = mock_telegram_update(user_id=1001)
+    await cmd_login(update_https, context_https)
+    _, kwargs = update_https.effective_message.reply_text.call_args
     markup = kwargs.get("reply_markup")
     assert markup is not None
     portal_btn = markup.inline_keyboard[0][0]
     assert "Open Mobile Login Portal" in portal_btn.text
-    assert "/login?token=" in portal_btn.url
+    assert "https://recorder-bot.onrender.com/login?token=" in portal_btn.url
 
 
 @pytest.mark.asyncio

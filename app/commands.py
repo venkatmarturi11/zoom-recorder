@@ -134,20 +134,47 @@ async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     portal_url = f"{settings.effective_public_url}/login?token={session.token}"
 
+    # Also compute LAN IP URL for local testing from mobile device on same Wi-Fi
+    import socket
+    lan_ip = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        lan_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        pass
+
+    lan_url = f"http://{lan_ip}:{settings.effective_port}/login?token={session.token}" if lan_ip and lan_ip != "127.0.0.1" else None
+
+    # Telegram API strictly rejects localhost and non-HTTPS in InlineKeyboardButton URL
+    is_https = portal_url.startswith("https://") and not any(
+        h in portal_url.lower() for h in ("localhost", "127.0.0.1", "0.0.0.0")
+    )
+
+    keyboard = []
+    if is_https:
+        keyboard.append([InlineKeyboardButton("📱 Open Mobile Login Portal", url=portal_url)])
+    keyboard.append([InlineKeyboardButton("👤 View Account Status", callback_data="cmd_account")])
+
     text = (
         "🔐 *One-Time Zoom Login Portal*\n\n"
-        "Connect your Zoom account securely from your phone without operating a computer:\n\n"
+        "Connect your Zoom account securely without operating a computer:\n\n"
+    )
+    if is_https:
+        text += f"Tap the button below or open this link:\n👉 {portal_url}\n\n"
+    else:
+        text += f"Open this link in your browser to sign in:\n👉 {portal_url}\n\n"
+        if lan_url:
+            text += f"📱 *From Phone (Same Wi-Fi):*\n👉 {lan_url}\n\n"
+
+    text += (
         "• *Zero Password in Chat:* Your password is never sent through Telegram.\n"
         "• *Cloud Browser Login:* Chromium signs in on Zoom and captures only encrypted cookies.\n"
         "• *AES-256 Storage:* Your session is encrypted at rest and isolated to your account.\n"
         "• *Automatic Reuse:* Future `/join` requests will automatically join as your authenticated account!\n\n"
         "⏱️ _This single-use portal link expires in 10 minutes._"
     )
-
-    keyboard = [
-        [InlineKeyboardButton("📱 Open Mobile Login Portal", url=portal_url)],
-        [InlineKeyboardButton("👤 View Account Status", callback_data="cmd_account")],
-    ]
 
     await update.effective_message.reply_text(
         text=text,
