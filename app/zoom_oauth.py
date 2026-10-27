@@ -84,8 +84,8 @@ class ZoomOAuthService:
             "redirect_uri": self.settings.zoom_oauth_redirect_uri,
             "state": state,
         }
-        if self.settings.zoom_oauth_scope:
-            params["scope"] = self.settings.zoom_oauth_scope
+        if self.settings.zoom_oauth_scope and self.settings.zoom_oauth_scope.strip():
+            params["scope"] = self.settings.zoom_oauth_scope.strip()
 
         auth_url = f"{self.ZOOM_AUTHORIZE_URL}?{urlencode(params)}"
         logger.info("Generated Zoom OAuth authorization URL for Telegram user %d", telegram_user_id)

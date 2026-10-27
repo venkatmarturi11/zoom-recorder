@@ -149,9 +149,9 @@ class Settings(BaseSettings):
         default=None,
         description="Zoom App Marketplace OAuth Client Secret",
     )
-    zoom_oauth_scope: str = Field(
-        default="user:read",
-        description="Minimal OAuth scope genuinely required for user identity authorization",
+    zoom_oauth_scope: Optional[str] = Field(
+        default="user:read:user",
+        description="Minimal OAuth scope genuinely required for user identity authorization (user:read:user for General App)",
     )
 
     @property
