@@ -52,7 +52,9 @@ class BrowserManager:
         try:
             self._playwright = await async_playwright().start()
 
-            # Launch arguments for stealth and media compatibility
+            width, height = self.settings.resolution_tuple
+
+            # Launch arguments for stealth, media compatibility, and low RAM consumption on cloud containers
             launch_args = [
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
@@ -62,13 +64,19 @@ class BrowserManager:
                 "--no-zygote",
                 "--disable-gpu",
                 "--autoplay-policy=no-user-gesture-required",  # Auto-plays audio without clicking
-                "--window-size=1280,720",
+                f"--window-size={width},{height}",
                 "--disable-infobars",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-features=IsolateOrigins,site-per-process",
+                "--js-flags=--max-old-space-size=160",
+                "--renderer-process-limit=1",
+                "--disable-extensions",
+                "--disable-component-extensions-with-background-pages",
+                "--disk-cache-size=10485760",
+                "--disable-background-networking",
+                "--disable-default-apps",
+                "--disable-sync",
             ]
-
-            width, height = self.settings.resolution_tuple
 
             self._browser = await self._playwright.chromium.launch(
                 headless=self.settings.browser_headless,
