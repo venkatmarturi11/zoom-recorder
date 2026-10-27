@@ -124,6 +124,9 @@ project/
 | Command | Description | Example |
 |---|---|---|
 | `/start` | Welcome dashboard, bot name status, and interactive buttons | `/start` |
+| `/login` | Secure one-time Zoom mobile login with cloud browser | `/login` |
+| `/account` | Check Zoom connection status, session health, and storage | `/account` |
+| `/logout` | Disconnect Zoom account and delete encrypted session | `/logout` |
 | `/setname <name>` | One-time setup of custom Zoom participant name | `/setname John Doe (Recording Bot)` |
 | `/help` | Available commands, parameters, and troubleshooting | `/help` |
 | `/join <url>` | Validate Zoom link, create job, and start cloud recording | `/join https://us02web.zoom.us/j/1234567890?pwd=xyz` |

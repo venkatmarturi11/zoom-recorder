@@ -39,11 +39,18 @@ async def init_db() -> None:
     """Create all database tables if they do not exist and ensure schema integrity."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # Gracefully add custom_display_name column if migrating an existing database
-        try:
-            await conn.execute(text("ALTER TABLE users ADD COLUMN custom_display_name VARCHAR(128)"))
-        except Exception:
-            pass  # Column already exists or fresh database
+        # Gracefully add custom columns if migrating an existing database
+        for col_def in [
+            "custom_display_name VARCHAR(128)",
+            "zoom_email VARCHAR(256)",
+            "zoom_connected_at DATETIME",
+            "zoom_session_status VARCHAR(32) DEFAULT 'DISCONNECTED'",
+        ]:
+            try:
+                col_name = col_def.split()[0]
+                await conn.execute(text(f"ALTER TABLE users ADD COLUMN {col_def}"))
+            except Exception:
+                pass  # Column already exists or fresh database
 
 
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
@@ -120,6 +127,61 @@ async def set_user_display_name(telegram_id: int, display_name: str) -> Optional
         user = result.scalar_one_or_none()
         if user:
             user.custom_display_name = display_name.strip()
+            await session.commit()
+            await session.refresh(user)
+        return user
+
+
+async def update_user_zoom_session(
+    telegram_id: int,
+    zoom_email: Optional[str] = None,
+    status: str = "CONNECTED",
+) -> Optional[User]:
+    """Update user's Zoom account session status and masked email."""
+    async with async_session_factory() as session:
+        stmt = select(User).where(User.telegram_id == telegram_id)
+        result = await session.execute(stmt)
+        user = result.scalar_one_or_none()
+        if user:
+            user.zoom_session_status = status
+            if zoom_email is not None:
+                user.zoom_email = zoom_email
+            if status == "CONNECTED":
+                user.zoom_connected_at = utc_now()
+            await session.commit()
+            await session.refresh(user)
+        return user
+
+
+async def get_user_zoom_status(telegram_id: int) -> dict:
+    """Retrieve user's Zoom account status, masked email, and connection timestamp."""
+    async with async_session_factory() as session:
+        stmt = select(User).where(User.telegram_id == telegram_id)
+        result = await session.execute(stmt)
+        user = result.scalar_one_or_none()
+        if not user:
+            return {
+                "status": "DISCONNECTED",
+                "zoom_email": None,
+                "connected_at": None,
+            }
+        return {
+            "status": user.zoom_session_status or "DISCONNECTED",
+            "zoom_email": user.zoom_email,
+            "connected_at": user.zoom_connected_at,
+        }
+
+
+async def disconnect_user_zoom(telegram_id: int) -> Optional[User]:
+    """Mark user's Zoom session as disconnected and clear account email."""
+    async with async_session_factory() as session:
+        stmt = select(User).where(User.telegram_id == telegram_id)
+        result = await session.execute(stmt)
+        user = result.scalar_one_or_none()
+        if user:
+            user.zoom_session_status = "DISCONNECTED"
+            user.zoom_email = None
+            user.zoom_connected_at = None
             await session.commit()
             await session.refresh(user)
         return user

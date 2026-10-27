@@ -143,3 +143,32 @@ class NotificationService:
             )
         except Exception as exc:
             logger.error("Failed to send completion notification to %d: %s", chat_id, exc)
+
+    async def send_custom_message(
+        self,
+        chat_id: int,
+        message_text: str,
+        reply_markup: Optional[InlineKeyboardMarkup] = None,
+    ) -> None:
+        """Send custom text notification to a specific chat."""
+        if not self.bot:
+            logger.warning("Bot instance not set; skipping message to chat %d", chat_id)
+            return
+        try:
+            await self.bot.send_message(
+                chat_id=chat_id,
+                text=message_text,
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+            )
+        except Exception as exc:
+            try:
+                plain_text = message_text.replace("*", "").replace("`", "").replace("_", "")
+                await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=plain_text,
+                    reply_markup=reply_markup,
+                )
+            except Exception as final_exc:
+                logger.error("Failed to send message to %d: %s", chat_id, final_exc)
+

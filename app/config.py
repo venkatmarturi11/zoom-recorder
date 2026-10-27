@@ -135,6 +135,11 @@ class Settings(BaseSettings):
         description="Port for incoming Telegram webhook and UptimeRobot HTTP server",
     )
 
+    public_app_url: Optional[str] = Field(
+        default=None,
+        description="Public HTTPS URL for authentication portal and webhooks (e.g. https://my-app.onrender.com)",
+    )
+
     @property
     def effective_port(self) -> int:
         """Port to bind for HTTP keep-alive and webhooks (respects Render's $PORT environment variable)."""
@@ -143,6 +148,22 @@ class Settings(BaseSettings):
         if env_port and env_port.isdigit():
             return int(env_port)
         return self.webhook_port
+
+    @property
+    def effective_public_url(self) -> str:
+        """Determines the public base URL for the mobile authentication portal."""
+        import os
+        if self.public_app_url:
+            return self.public_app_url.rstrip("/")
+        render_ext_url = os.environ.get("RENDER_EXTERNAL_URL")
+        if render_ext_url:
+            return render_ext_url.rstrip("/")
+        render_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+        if render_host:
+            return f"https://{render_host}"
+        if self.webhook_url:
+            return self.webhook_url.rstrip("/")
+        return f"http://localhost:{self.effective_port}"
 
     @field_validator("allowed_telegram_user_ids", "admin_user_ids", mode="after")
     @classmethod

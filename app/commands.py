@@ -12,18 +12,22 @@ from telegram import (
 )
 from telegram.ext import ContextTypes
 
-from app.auth import authorized_telegram_user_only
+from app.auth import PersistentZoomSessionManager, authorized_telegram_user_only
 from app.config import get_settings
 from app.database import (
+    disconnect_user_zoom,
     get_active_job_for_user,
     get_or_create_user,
     get_recording,
     get_recording_job,
     get_recordings_for_user,
     get_system_health_stats,
+    get_user_zoom_status,
     set_user_display_name,
+    update_user_zoom_session,
 )
 from app.job_manager import JobManager
+from app.login_session import get_login_session_manager
 from app.models import JobState
 from app.security import InvalidZoomURLError, SSRFAttemptError, validate_and_parse_zoom_url
 from app.storage import get_storage_provider
@@ -43,6 +47,7 @@ def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
     """Return the persistent bottom menu bar keyboard docked below chat input."""
     keyboard = [
         [KeyboardButton("🎥 Join Meeting"), KeyboardButton("📊 Status")],
+        [KeyboardButton("🔐 Zoom Login"), KeyboardButton("👤 My Account")],
         [KeyboardButton("⏹️ Stop Recording"), KeyboardButton("📁 Recordings")],
         [KeyboardButton("🏷️ Set Bot Name"), KeyboardButton("🛟 Help")],
     ]
@@ -67,12 +72,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     configured_name = db_user.custom_display_name
     settings = get_settings()
     active_bot_name = configured_name or settings.bot_display_name
+    zoom_badge = db_user.zoom_email or "Not connected"
 
     text = (
         f"👋 *Welcome to Zoom Cloud Recorder, {user.first_name}!*\n\n"
         "This service records Zoom meetings directly in a secure cloud browser and "
         "delivers MP4 recordings with full video and audio directly to your phone.\n\n"
         f"🏷️ *Your Zoom Bot Name:* `{active_bot_name}`\n"
+        f"🔐 *Zoom Account:* `{zoom_badge}`\n\n"
     )
 
     if not configured_name:
@@ -80,17 +87,20 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "⚠️ _You haven't set a custom name yet. The bot will join with the default name._\n"
             "👉 *One-time setup:* Tap *'Set Bot Name'* below or send `/setname Your Name`.\n\n"
         )
-    else:
-        text += "✅ _Configured and ready for all future recordings._\n\n"
 
     text += (
         "📋 *Requirements for Recording:*\n"
         "• Valid Zoom meeting link (with passcode if required)\n"
-        "• Meeting host must admit the recording participant\n\n"
+        "• One-time Zoom login (`/login`) for meetings requiring authorized accounts\n"
+        "• Host admission if waiting room is enabled\n\n"
         "🚀 *Quick Controls:*"
     )
 
     keyboard = [
+        [
+            InlineKeyboardButton("🔐 Zoom Login", callback_data="cmd_login"),
+            InlineKeyboardButton("👤 My Account", callback_data="cmd_account"),
+        ],
         [
             InlineKeyboardButton("📊 Current Status", callback_data="cmd_status"),
             InlineKeyboardButton("📁 My Recordings", callback_data="cmd_recordings"),
@@ -108,6 +118,115 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text=text,
         parse_mode="Markdown",
         reply_markup=get_main_menu_keyboard(),
+    )
+
+
+@authorized_telegram_user_only
+async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /login command: generate a secure one-time mobile URL to authenticate Zoom."""
+    tg_user = update.effective_user
+    db_user = await get_or_create_user(telegram_id=tg_user.id)
+    settings = get_settings()
+
+    notifier = getattr(job_manager, "notifier", None)
+    login_mgr = get_login_session_manager(notifier=notifier)
+    session = login_mgr.create_session(telegram_id=tg_user.id, user_id=db_user.id)
+
+    portal_url = f"{settings.effective_public_url}/login?token={session.token}"
+
+    text = (
+        "🔐 *One-Time Zoom Login Portal*\n\n"
+        "Connect your Zoom account securely from your phone without operating a computer:\n\n"
+        "• *Zero Password in Chat:* Your password is never sent through Telegram.\n"
+        "• *Cloud Browser Login:* Chromium signs in on Zoom and captures only encrypted cookies.\n"
+        "• *AES-256 Storage:* Your session is encrypted at rest and isolated to your account.\n"
+        "• *Automatic Reuse:* Future `/join` requests will automatically join as your authenticated account!\n\n"
+        "⏱️ _This single-use portal link expires in 10 minutes._"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("📱 Open Mobile Login Portal", url=portal_url)],
+        [InlineKeyboardButton("👤 View Account Status", callback_data="cmd_account")],
+    ]
+
+    await update.effective_message.reply_text(
+        text=text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+@authorized_telegram_user_only
+async def cmd_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /account command: display connection status and session health without revealing secrets."""
+    tg_user = update.effective_user
+    db_user = await get_or_create_user(telegram_id=tg_user.id)
+    settings = get_settings()
+
+    session_mgr = PersistentZoomSessionManager()
+    is_valid, validation_msg = session_mgr.validate_user_session(db_user.id)
+
+    status_str = db_user.zoom_session_status or "DISCONNECTED"
+    if status_str == "CONNECTED" and not is_valid:
+        status_str = "EXPIRED"
+
+    status_badge = {
+        "CONNECTED": "CONNECTED ✅",
+        "DISCONNECTED": "NOT CONNECTED ❌",
+        "EXPIRED": "EXPIRED ⚠️",
+    }.get(status_str, status_str)
+
+    storage_mode = (
+        "Cloudflare R2 Persistent (Survives Restarts) ☁️"
+        if settings.storage_provider == "s3"
+        else "Local Encrypted File (Add Cloudflare R2 for zero-cost cloud persistence) ⚠️"
+    )
+
+    date_str = db_user.zoom_connected_at.strftime("%Y-%m-%d %H:%M UTC") if db_user.zoom_connected_at else "Never"
+
+    text = (
+        "👤 *Zoom Account Connection Status*\n\n"
+        f"• *Status:* `{status_badge}`\n"
+        f"• *Zoom Account:* `{db_user.zoom_email or 'None'}`\n"
+        f"• *Connected Since:* `{date_str}`\n"
+        f"• *Session Health:* `{'Active & Valid' if is_valid else (validation_msg or 'No Session')}`\n"
+        f"• *Storage Encryption:* `Fernet AES-256`\n"
+        f"• *Persistence Tier:* _{storage_mode}_\n\n"
+    )
+
+    buttons = []
+    if status_str == "CONNECTED" and is_valid:
+        text += "✅ _Your session is active. Future /join calls will automatically reuse it._"
+        buttons.append([
+            InlineKeyboardButton("🔄 Re-authenticate", callback_data="cmd_login"),
+            InlineKeyboardButton("🚪 Disconnect Account", callback_data="cmd_logout"),
+        ])
+    else:
+        text += "👉 _To connect your Zoom account, tap below to open the mobile login portal._"
+        buttons.append([
+            InlineKeyboardButton("🔐 Connect Zoom Account", callback_data="cmd_login"),
+        ])
+
+    keyboard = InlineKeyboardMarkup(buttons)
+    await update.effective_message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+
+
+@authorized_telegram_user_only
+async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /logout command: clear saved encrypted Zoom session."""
+    tg_user = update.effective_user
+    db_user = await get_or_create_user(telegram_id=tg_user.id)
+
+    session_mgr = PersistentZoomSessionManager()
+    await session_mgr.clear_session_state_async(db_user.id)
+    await disconnect_user_zoom(tg_user.id)
+
+    await update.effective_message.reply_text(
+        "🚪 *Zoom Account Disconnected*\n\n"
+        "Your encrypted session tokens have been permanently deleted from storage.\n"
+        "Future meeting recordings will join as a guest participant using your configured bot name.\n\n"
+        "You can reconnect anytime using `/login`.",
+        parse_mode="Markdown",
     )
 
 
@@ -158,6 +277,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /help command with full documentation."""
     help_text = (
         "📖 *Zoom Recorder Bot — Command Reference*\n\n"
+        "• `/login` — Securely connect your Zoom account via mobile portal (one-time setup)\n"
+        "• `/account` — Check Zoom connection status, session health, and storage\n"
+        "• `/logout` — Disconnect Zoom account and delete encrypted session\n"
         "• `/setname <name>` — Set your one-time custom Zoom bot participant name\n"
         "• `/join <zoom_link>` — Start cloud browser recording of a Zoom meeting\n"
         "• `/status [job_id]` — Check state of current or specified recording\n"
@@ -220,6 +342,23 @@ async def cmd_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         last_name=tg_user.last_name,
     )
 
+    # Validate Zoom browser session state
+    session_mgr = PersistentZoomSessionManager()
+    is_session_valid, session_err = session_mgr.validate_user_session(db_user.id)
+    session_badge = "Guest Participant"
+    if db_user.zoom_session_status == "CONNECTED":
+        if is_session_valid:
+            session_badge = f"Authenticated ({db_user.zoom_email or 'Session Reused'})"
+        else:
+            await update_user_zoom_session(tg_user.id, status="EXPIRED")
+            await update.effective_message.reply_text(
+                "⚠️ *Notice: Saved Zoom Session Expired*\n\n"
+                f"Your saved Zoom session has expired ({session_err}).\n"
+                "The bot will attempt to join as a guest participant. If this meeting requires "
+                "authorized login, please run `/login` to reconnect your account.",
+                parse_mode="Markdown",
+            )
+
     # 2. Create and start job via JobManager
     try:
         job = await job_manager.create_and_start_job(
@@ -235,6 +374,7 @@ async def cmd_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Recording request received.\n\n"
             f"*Job ID:* `{job.job_id}`\n"
             f"*Participant Name:* `{job.display_name}`\n"
+            f"*Session Mode:* `{session_badge}`\n"
             f"*Status:* `Preparing browser`\n"
             f"*Meeting:* `Validating access (ID: {meeting_id})`\n\n"
             "_You will receive another notification when the recording starts._"
@@ -543,6 +683,12 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await cmd_health(update, context)
     elif data == "cmd_setname":
         await cmd_setname(update, context)
+    elif data == "cmd_login":
+        await cmd_login(update, context)
+    elif data == "cmd_account":
+        await cmd_account(update, context)
+    elif data == "cmd_logout":
+        await cmd_logout(update, context)
 
 
 @authorized_telegram_user_only
@@ -570,6 +716,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     elif text in ("📊 Status", "Status"):
         await cmd_status(update, context)
+        return
+    elif text in ("🔐 Zoom Login", "Zoom Login"):
+        await cmd_login(update, context)
+        return
+    elif text in ("👤 My Account", "My Account", "Account"):
+        await cmd_account(update, context)
         return
     elif text in ("⏹️ Stop Recording", "Stop Recording", "Stop"):
         await cmd_stop(update, context)
@@ -602,14 +754,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     db_user = await get_or_create_user(telegram_id=user.id)
     settings = get_settings()
     active_bot_name = db_user.custom_display_name or settings.bot_display_name
+    zoom_account_info = db_user.zoom_email or "Not connected"
 
     reply = (
         f"👋 *Hi {user.first_name}!*\n\n"
         "To start recording, simply *send or paste a Zoom meeting link* here or tap *'🎥 Join Meeting'* below!\n\n"
-        f"🏷️ *Bot Participant Name:* `{active_bot_name}`\n\n"
+        f"🏷️ *Bot Participant Name:* `{active_bot_name}`\n"
+        f"🔐 *Zoom Account:* `{zoom_account_info}`\n\n"
         "🚀 *Commands & Quick Controls:*\n"
         "• 🎥 *Join Meeting* - Paste any Zoom link\n"
         "• 📊 *Status* - Check current recording status\n"
+        "• 🔐 *Zoom Login* - Connect your Zoom account (one-time setup)\n"
+        "• 👤 *My Account* - Check connection status & session health\n"
         "• ⏹️ *Stop Recording* - Stop active recording & get MP4\n"
         "• 📁 *Recordings* - View past recordings & download links\n"
         "• 🏷️ *Set Bot Name* - Change your bot's name in meetings\n"

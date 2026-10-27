@@ -26,6 +26,7 @@ from app.models import JobState
 @pytest.fixture
 def mock_job_manager():
     manager = MagicMock(spec=JobManager)
+    manager.notifier = MagicMock()
     manager.create_and_start_job = AsyncMock()
     manager.stop_job = AsyncMock(return_value=True)
     manager.cancel_job = AsyncMock(return_value=(True, "Cancelled successfully"))
@@ -243,6 +244,8 @@ async def test_get_main_menu_keyboard():
     button_texts = [btn.text for row in kb.keyboard for btn in row]
     assert "🎥 Join Meeting" in button_texts
     assert "📊 Status" in button_texts
+    assert "🔐 Zoom Login" in button_texts
+    assert "👤 My Account" in button_texts
     assert "⏹️ Stop Recording" in button_texts
     assert "📁 Recordings" in button_texts
     assert "🏷️ Set Bot Name" in button_texts
@@ -258,5 +261,72 @@ async def test_handle_message_menu_button_tap(mock_telegram_update):
     reply = _extract_reply_text(update.effective_message.reply_text.call_args)
     assert "Join & Record Zoom Meeting" in reply
     assert "zoom.us" in reply
+
+
+@pytest.mark.asyncio
+async def test_cmd_login_generates_portal_url(mock_telegram_update):
+    """Verify /login generates an encrypted one-time mobile authentication link."""
+    from app.commands import cmd_login
+    update, context = mock_telegram_update(user_id=1001)
+    await cmd_login(update, context)
+    update.effective_message.reply_text.assert_called_once()
+    reply = _extract_reply_text(update.effective_message.reply_text.call_args)
+    assert "One-Time Zoom Login Portal" in reply
+    assert "Zero Password in Chat" in reply
+
+    # Check button URL
+    _, kwargs = update.effective_message.reply_text.call_args
+    markup = kwargs.get("reply_markup")
+    assert markup is not None
+    portal_btn = markup.inline_keyboard[0][0]
+    assert "Open Mobile Login Portal" in portal_btn.text
+    assert "/login?token=" in portal_btn.url
+
+
+@pytest.mark.asyncio
+async def test_cmd_account_and_logout(mock_telegram_update):
+    """Verify /account reports connection status and /logout clears session."""
+    from app.commands import cmd_account, cmd_logout
+    from app.database import update_user_zoom_session
+
+    update, context = mock_telegram_update(user_id=1001)
+
+    # 1. Initially disconnected
+    await cmd_account(update, context)
+    reply = _extract_reply_text(update.effective_message.reply_text.call_args)
+    assert "Zoom Account Connection Status" in reply
+    assert "NOT CONNECTED" in reply
+
+    # 2. Mark connected
+    await update_user_zoom_session(telegram_id=1001, zoom_email="u***@example.com", status="CONNECTED")
+    update.effective_message.reply_text.reset_mock()
+    await cmd_account(update, context)
+    reply2 = _extract_reply_text(update.effective_message.reply_text.call_args)
+    assert "u***@example.com" in reply2
+
+    # 3. Disconnect via /logout
+    update.effective_message.reply_text.reset_mock()
+    await cmd_logout(update, context)
+    reply3 = _extract_reply_text(update.effective_message.reply_text.call_args)
+    assert "Zoom Account Disconnected" in reply3
+
+
+@pytest.mark.asyncio
+async def test_handle_message_login_account_buttons(mock_telegram_update):
+    """Verify tapping '🔐 Zoom Login' and '👤 My Account' on keyboard triggers handlers."""
+    # Test Zoom Login button
+    update, context = mock_telegram_update(user_id=1001, text="🔐 Zoom Login")
+    await handle_message(update, context)
+    update.effective_message.reply_text.assert_called_once()
+    reply = _extract_reply_text(update.effective_message.reply_text.call_args)
+    assert "One-Time Zoom Login Portal" in reply
+
+    # Test My Account button
+    update2, context2 = mock_telegram_update(user_id=1001, text="👤 My Account")
+    await handle_message(update2, context2)
+    update2.effective_message.reply_text.assert_called_once()
+    reply2 = _extract_reply_text(update2.effective_message.reply_text.call_args)
+    assert "Zoom Account Connection Status" in reply2
+
 
 

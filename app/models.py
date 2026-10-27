@@ -54,6 +54,9 @@ class User(Base):
     is_admin = Column(Boolean, default=False, nullable=False)
     is_allowed = Column(Boolean, default=False, nullable=False)
     custom_display_name = Column(String(128), nullable=True)  # User's one-time configured Zoom bot name
+    zoom_email = Column(String(256), nullable=True)  # Masked Zoom account email
+    zoom_connected_at = Column(DateTime, nullable=True)
+    zoom_session_status = Column(String(32), default="DISCONNECTED", nullable=False)  # DISCONNECTED, CONNECTED, EXPIRED
     created_at = Column(DateTime, default=utc_now, nullable=False)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
 

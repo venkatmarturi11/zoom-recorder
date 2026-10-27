@@ -82,3 +82,111 @@ def test_persistent_zoom_session_manager(tmp_path):
     manager.clear_session_state(user_id)
     assert not saved_file.exists()
     assert manager.load_session_state(user_id) is None
+
+
+def test_validate_session_state():
+    """Verify session cookie validation and expiration detection."""
+    from app.auth import validate_session_state
+    import time
+
+    # Valid unexpired session
+    valid_state = {
+        "cookies": [
+            {
+                "name": "_zm_ssid",
+                "value": "valid_token",
+                "domain": ".zoom.us",
+                "expires": time.time() + 3600,
+            }
+        ]
+    }
+    is_valid, err = validate_session_state(valid_state)
+    assert is_valid is True
+    assert err is None
+
+    # Session with session cookie (expires == -1)
+    session_cookie_state = {
+        "cookies": [
+            {
+                "name": "_zm_ctaid",
+                "value": "session_tok",
+                "domain": ".zoom.us",
+                "expires": -1,
+            }
+        ]
+    }
+    is_valid2, _ = validate_session_state(session_cookie_state)
+    assert is_valid2 is True
+
+    # Expired session cookies
+    expired_state = {
+        "cookies": [
+            {
+                "name": "_zm_ssid",
+                "value": "expired_token",
+                "domain": ".zoom.us",
+                "expires": time.time() - 3600,  # 1 hour ago
+            }
+        ]
+    }
+    is_valid3, err3 = validate_session_state(expired_state)
+    assert is_valid3 is False
+    assert "expired" in err3.lower()
+
+    # No Zoom cookies
+    non_zoom_state = {
+        "cookies": [
+            {
+                "name": "other_site",
+                "value": "123",
+                "domain": "example.com",
+            }
+        ]
+    }
+    is_valid4, err4 = validate_session_state(non_zoom_state)
+    assert is_valid4 is False
+
+
+def test_mask_email():
+    """Verify email masking for Telegram privacy."""
+    from app.security import mask_email
+
+    assert mask_email("johndoe@example.com") == "j***e@example.com"
+    assert mask_email("ab@gmail.com") == "a***@gmail.com"
+    assert mask_email(None) == "Unknown"
+    assert mask_email("invalid-email") == "Unknown"
+
+
+@pytest.mark.asyncio
+async def test_login_session_lifecycle(tmp_path):
+    """Verify LoginSessionManager token generation, expiration, and state import."""
+    from app.login_session import LoginSessionManager
+    import time
+
+    mgr = LoginSessionManager()
+    mgr.session_manager.session_dir = tmp_path
+
+    session = mgr.create_session(telegram_id=1001, user_id=1)
+    assert session.token is not None
+    assert len(session.token) > 20
+    assert session.status == "PENDING"
+
+    # Fetch active
+    fetched = mgr.get_session(session.token)
+    assert fetched is session
+
+    # Import valid storage state
+    valid_storage = {
+        "cookies": [
+            {"name": "_zm_ssid", "value": "test_tok", "domain": ".zoom.us", "expires": time.time() + 7200}
+        ]
+    }
+    success, msg = await mgr.import_session_state(session.token, valid_storage)
+    assert success is True
+    assert session.status == "SUCCESS"
+
+    # Loaded session from disk
+    loaded = mgr.session_manager.load_session_state(1)
+    assert loaded is not None
+    assert loaded["cookies"][0]["name"] == "_zm_ssid"
+

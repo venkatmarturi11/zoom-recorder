@@ -102,19 +102,49 @@ Before recording your first meeting, set the participant name that attendees wil
    ```text
    /setname John Doe (Recording Bot)
    ```
-   *(Or tap the interactive **'🏷️ Set Bot Name'** button)*
+   *(Or tap the interactive **'🏷️ Set Bot Name'** button on the bottom menu bar)*
 4. The bot will confirm:
    `✅ Zoom Bot Name Saved Successfully!`
 5. **You only need to do this once.** The bot permanently remembers this name in its database and will join all your future Zoom meetings with it.
 
 ---
 
-## Step 7: Record Your Meetings
+## Step 7: One-Time Zoom Account Authentication (Mobile Portal)
 
-1. Send any Zoom meeting link to your bot:
+If your meetings require signing in with an authorized Zoom account (or to avoid guest limitations):
+
+1. Tap **🔐 Zoom Login** on the persistent bottom menu bar (or send `/login`).
+2. The bot generates an encrypted, single-use mobile portal link valid for 10 minutes.
+3. Tap **📱 Open Mobile Login Portal** on your Android phone.
+4. The dark-mode portal will open in your mobile browser:
+   - **Zero Password in Chat:** Your password is never sent through Telegram or logged.
+   - **Cloud Browser Automation:** Chromium securely logs into Zoom in the cloud and captures only encrypted cookies.
+   - **2-Factor Authentication (MFA):** If Zoom asks for a 6-digit verification code, the portal dynamically prompts you to enter it.
+   - **Session Import Fallback:** You can also import existing `storage_state.json` cookies directly.
+5. Once complete, you will see a green checkmark: `Zoom Account Connected!`
+6. Return to Telegram. The bot will notify you:
+   `✅ Zoom Account Connected Successfully! (Account: u***@domain.com)`
+7. **Automatic Session Reuse:** From now on, all `/join` commands will automatically load and reuse this authenticated session without asking for credentials again.
+8. Send `/account` or tap **👤 My Account** anytime to inspect session health, connection timestamp, and storage encryption.
+
+---
+
+## Step 8: Record Your Meetings with Automatic Session Reuse
+
+1. Send any Zoom meeting link to your bot, or tap **🎥 Join Meeting**:
    ```text
    /join https://us02web.zoom.us/j/1234567890?pwd=yourpassword
    ```
-2. The bot will join with your custom name, wait for host admission, and begin capturing video + audio.
-3. Tap **⏹️ Stop Recording** whenever you wish to finish, or let the meeting conclude.
-4. The bot will upload the MP4 and send you a direct download link!
+2. The bot verifies the URL and validates your saved Zoom session.
+3. It joins with your authenticated account and configured display name.
+4. Once admitted by the host, it captures video + audio.
+5. Tap **⏹️ Stop Recording** whenever you wish to finish, or let the meeting conclude.
+6. The bot uploads the MP4 and sends you a direct download link!
+
+---
+
+## Step 9: Expired Sessions & Cloud Persistence
+
+- **Session Expiration:** If Zoom invalidates cookies or requests re-authentication, the bot detects this immediately during `/join`, marks the session as `EXPIRED`, and alerts you on Telegram with a one-tap link to `/login` again.
+- **Redeployment Persistence:** On free ephemeral containers (such as Render Free), local disk storage is wiped when containers redeploy. By configuring free Cloudflare R2 (`STORAGE_PROVIDER=s3`), your encrypted session files are automatically backed up to R2 and restored on fresh deployments without re-authenticating!
+

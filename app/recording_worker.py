@@ -15,6 +15,7 @@ from app.database import (
     create_recording_metadata,
     update_job_status,
     update_recording_upload_status,
+    update_user_zoom_session,
 )
 from app.media_processor import MediaProcessor
 from app.models import JobState, RecordingJob
@@ -58,7 +59,7 @@ class RecordingWorker:
         try:
             # 1. State: STARTING_BROWSER
             await self._update_state(JobState.STARTING_BROWSER, "Launching Chromium environment...")
-            saved_session = self.session_manager.load_session_state(self.job.user_id)
+            saved_session = await self.session_manager.load_session_state_async(self.job.user_id)
             page = await self.browser_manager.launch_browser(storage_state=saved_session)
 
             # 2. State: JOINING_MEETING
@@ -93,10 +94,20 @@ class RecordingWorker:
                     raise TimeoutError("Host did not admit the recording assistant within 10 minutes.")
 
             elif detected_state == JobState.WAITING_FOR_AUTHORIZATION:
+                await update_user_zoom_session(self.telegram_chat_id, status="EXPIRED")
                 await self._update_state(
                     JobState.WAITING_FOR_AUTHORIZATION,
                     "Meeting requires registration, sign-in, or host authorization.",
                 )
+                if self.notifier:
+                    await self.notifier.send_custom_message(
+                        chat_id=self.telegram_chat_id,
+                        message_text=(
+                            "🔒 *Zoom Authentication Required*\n\n"
+                            "This meeting requires an authorized Zoom account or your previous session has expired.\n\n"
+                            "Please run `/login` to connect your account and try again."
+                        ),
+                    )
                 raise PermissionError("Access restricted: Registration or host authentication required.")
 
             # 3. State: PREPARING_CAPTURE & RECORDING
@@ -111,7 +122,7 @@ class RecordingWorker:
             # Save updated storage cookies/session if successful
             session_state = await self.browser_manager.get_storage_state()
             if session_state:
-                self.session_manager.save_session_state(self.job.user_id, session_state)
+                await self.session_manager.save_session_state_async(self.job.user_id, session_state)
 
             # 4. Sustained Recording Loop
             # Runs until stop requested, meeting ends, browser closes, or safety timeout

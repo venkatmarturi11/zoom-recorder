@@ -153,3 +153,16 @@ class EncryptedSessionStorage:
     def decrypt_data(self, ciphertext: str) -> str:
         """Decrypt ciphertext back to plaintext string."""
         return self._fernet.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
+
+
+def mask_email(email: Optional[str]) -> str:
+    """Mask email for secure display in Telegram messages (e.g. u***@domain.com)."""
+    if not email or "@" not in email:
+        return "Unknown"
+    user_part, domain_part = email.split("@", 1)
+    if len(user_part) <= 2:
+        masked_user = user_part[0] + "***"
+    else:
+        masked_user = user_part[0] + "***" + user_part[-1]
+    return f"{masked_user}@{domain_part}"
+

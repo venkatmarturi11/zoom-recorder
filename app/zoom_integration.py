@@ -461,15 +461,21 @@ class ZoomMeetingIntegrator:
                     "Please verify the meeting is active and try again."
                 )
 
-            # Check for Bot Protection / Sign-In / Registration Required
+            # Check for Bot Protection / Sign-In / Registration Required / Login Redirect
+            curr_page_url = getattr(self.page, "url", "").lower()
             if (
                 "automated bots aren't allowed to join this meeting" in text_to_check
                 or "sign in to join" in text_to_check
+                or "sign in with your zoom account" in text_to_check
+                or "please sign in to join" in text_to_check
+                or "only signed-in users can join" in text_to_check
                 or "this meeting requires registration" in text_to_check
                 or "only authorized attendees can join" in text_to_check
                 or "meeting registration" in text_to_check
+                or "/signin" in curr_page_url
+                or "zoom.us/signin" in curr_page_url
             ):
-                logger.info("State detected: WAITING_FOR_AUTHORIZATION (Sign-in or bot check required)")
+                logger.info("State detected: WAITING_FOR_AUTHORIZATION (Sign-in, redirect, or bot check required)")
                 return JobState.WAITING_FOR_AUTHORIZATION
 
             # Check for Waiting Room in visible text

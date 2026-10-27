@@ -37,6 +37,11 @@ class StorageProvider(abc.ABC):
         """Delete file from storage."""
         pass
 
+    @abc.abstractmethod
+    async def download_file(self, storage_key: str, local_path: Path) -> bool:
+        """Download file from storage to a local path."""
+        pass
+
 
 class LocalStorageProvider(StorageProvider):
     """Local filesystem storage for development, testing, and staging."""
@@ -63,6 +68,15 @@ class LocalStorageProvider(StorageProvider):
         file_path = self.base_dir / storage_key
         if file_path.exists():
             file_path.unlink()
+            return True
+        return False
+
+    async def download_file(self, storage_key: str, local_path: Path) -> bool:
+        src = self.base_dir / storage_key
+        if src.exists():
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            if src.resolve() != local_path.resolve():
+                local_path.write_bytes(src.read_bytes())
             return True
         return False
 
@@ -169,6 +183,20 @@ class S3StorageProvider(StorageProvider):
             return True
         except Exception as exc:
             logger.error("Failed to delete S3 object %s: %s", storage_key, exc)
+            return False
+
+    async def download_file(self, storage_key: str, local_path: Path) -> bool:
+        loop = asyncio.get_running_loop()
+
+        def _do_download():
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            self._s3_client.download_file(Bucket=self.bucket, Key=storage_key, Filename=str(local_path))
+
+        try:
+            await loop.run_in_executor(None, _do_download)
+            return True
+        except Exception as exc:
+            logger.debug("S3 download_file (%s) failed: %s", storage_key, exc)
             return False
 
 
