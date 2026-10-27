@@ -107,7 +107,7 @@ class JobManager:
         """Signal an active job to gracefully finalize and upload, or cancel pre-recording state."""
         job = await db.get_recording_job(job_id)
         if not job:
-            return False, f"Job {job_id} was not found. The recording session may have concluded or the database was restarted."
+            return False, f"Job {job_id} was not found or has already concluded."
 
         user = await db.get_user_by_id(user_id)
         is_admin = bool(user and user.is_admin)
@@ -158,7 +158,7 @@ class JobManager:
         """Cancel a queued job that has not yet started recording."""
         job = await db.get_recording_job(job_id)
         if not job:
-            return False, f"Job {job_id} was not found. The recording session may have concluded or the database was restarted."
+            return False, f"Job {job_id} was not found or has already concluded."
 
         user = await db.get_user_by_id(user_id)
         is_admin = bool(user and user.is_admin)

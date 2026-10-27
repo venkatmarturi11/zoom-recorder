@@ -22,6 +22,14 @@ class ZoomAccessError(Exception):
     pass
 
 
+class ZoomRegistrationRequiredError(ZoomAccessError):
+    """Raised when a Zoom webinar or meeting strictly requires attendee registration."""
+
+    def __init__(self, register_url: str = "", message: Optional[str] = None):
+        self.register_url = register_url
+        super().__init__(message or f"Host registration required at {register_url}")
+
+
 class ZoomMeetingIntegrator:
     """Manages Zoom Web Client UI interactions, form filling, and meeting state transitions."""
 
@@ -628,28 +636,37 @@ class ZoomMeetingIntegrator:
                     "Please verify the meeting is active and try again."
                 )
 
-            # Check for Bot Protection / Sign-In / Registration Required / Login Redirect / Webinar Registration
-            curr_page_url = getattr(self.page, "url", "").lower()
+            # Check for Webinar / Meeting Registration Required
+            curr_page_url = getattr(self.page, "url", "")
+            curr_url_lower = curr_page_url.lower()
             is_registration = (
                 "webinar registration" in text_to_check
                 or "register and join" in text_to_check
                 or "this meeting requires registration" in text_to_check
                 or "meeting registration" in text_to_check
-                or "/webinar/register" in curr_page_url
-                or "#/registration" in curr_page_url
-                or "/register/" in curr_page_url
+                or "/webinar/register" in curr_url_lower
+                or "#/registration" in curr_url_lower
+                or "/register/" in curr_url_lower
             )
-            if is_registration or (
+            if is_registration:
+                logger.info("Webinar/meeting registration page detected: %s", curr_page_url)
+                raise ZoomRegistrationRequiredError(
+                    register_url=curr_page_url,
+                    message="Meeting or webinar requires attendee registration before joining.",
+                )
+
+            # Check for Bot Protection / Sign-In Required / Login Redirect
+            if (
                 "automated bots aren't allowed to join this meeting" in text_to_check
                 or "sign in to join" in text_to_check
                 or "sign in with your zoom account" in text_to_check
                 or "please sign in to join" in text_to_check
                 or "only signed-in users can join" in text_to_check
                 or "only authorized attendees can join" in text_to_check
-                or "/signin" in curr_page_url
-                or "zoom.us/signin" in curr_page_url
+                or "/signin" in curr_url_lower
+                or "zoom.us/signin" in curr_url_lower
             ):
-                logger.info("State detected: WAITING_FOR_AUTHORIZATION (Sign-in, redirect, or webinar registration required)")
+                logger.info("State detected: WAITING_FOR_AUTHORIZATION (Sign-in or host authorization required)")
                 return JobState.WAITING_FOR_AUTHORIZATION
 
             # Check for Waiting Room in visible text

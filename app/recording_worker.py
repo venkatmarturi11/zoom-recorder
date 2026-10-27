@@ -21,7 +21,12 @@ from app.media_processor import MediaProcessor
 from app.models import JobState, RecordingJob
 from app.notifications import NotificationService
 from app.storage import get_storage_provider
-from app.zoom_integration import ZoomAccessError, ZoomMeetingIntegrator, ZoomNavigationError
+from app.zoom_integration import (
+    ZoomAccessError,
+    ZoomMeetingIntegrator,
+    ZoomNavigationError,
+    ZoomRegistrationRequiredError,
+)
 
 logger = logging.getLogger("zoom_recorder.worker")
 
@@ -94,21 +99,21 @@ class RecordingWorker:
                     raise TimeoutError("Host did not admit the recording assistant within 10 minutes.")
 
             elif detected_state == JobState.WAITING_FOR_AUTHORIZATION:
-                await update_user_zoom_session(self.telegram_chat_id, status="EXPIRED")
                 await self._update_state(
-                    JobState.WAITING_FOR_AUTHORIZATION,
-                    "Meeting requires registration, sign-in, or host authorization.",
+                    JobState.FAILED,
+                    "Meeting requires Zoom sign-in or authorization.",
+                    error_message="Host requires sign-in with Zoom account.",
                 )
                 if self.notifier:
                     await self.notifier.send_custom_message(
                         chat_id=self.telegram_chat_id,
                         message_text=(
-                            "🔒 *Zoom Authentication Required*\n\n"
-                            "This meeting requires an authorized Zoom account or your previous session has expired.\n\n"
-                            "Please run `/login` to connect your account and try again."
+                            "🔒 *Zoom Sign-In Required*\n\n"
+                            "This meeting requires participants to be logged into a verified Zoom account.\n\n"
+                            "Please run `/login` to link your Zoom account and try again."
                         ),
                     )
-                raise PermissionError("Access restricted: Registration or host authentication required.")
+                return
 
             # 3. State: PREPARING_CAPTURE & RECORDING
             await self._update_state(JobState.PREPARING_CAPTURE, "Configuring audio/video tab capture...")
@@ -207,6 +212,29 @@ class RecordingWorker:
                     final_mp4_path.unlink()
                 logger.info("Cleaned up local temporary video files after external S3 upload.")
 
+        except ZoomRegistrationRequiredError as exc:
+            logger.warning("Job %s registration required: %s", self.job.job_id, exc)
+            await self._update_state(
+                JobState.FAILED,
+                "Webinar registration required.",
+                error_message=str(exc),
+            )
+            reg_url = exc.register_url or f"https://us06web.zoom.us/webinar/register/... (ID: {self.job.meeting_id})"
+            if self.notifier:
+                await self.notifier.send_custom_message(
+                    chat_id=self.telegram_chat_id,
+                    message_text=(
+                        "📋 *Zoom Webinar Registration Required*\n\n"
+                        f"Meeting `{self.job.meeting_id}` is a protected Zoom Webinar configured with host registration and captcha.\n\n"
+                        f"👉 *How to record this session:*\n"
+                        f"1. Open the registration page:\n   {reg_url}\n"
+                        f"2. Fill in your name & email and tick 'I am not a robot'.\n"
+                        f"3. Submit the form to receive your personal Attendee Link (`https://us06web.zoom.us/w/{self.job.meeting_id}?tk=...&pwd=...`).\n"
+                        f"4. Send that attendee link to this bot:\n"
+                        f"   `/join https://us06web.zoom.us/w/{self.job.meeting_id}?tk=...`\n\n"
+                        f"_The bot will join and record immediately with zero login required!_"
+                    ),
+                )
         except ZoomAccessError as exc:
             logger.warning("Job %s access error: %s", self.job.job_id, exc)
             await self._update_state(JobState.FAILED, f"Access blocked: {str(exc)}", error_message=str(exc))

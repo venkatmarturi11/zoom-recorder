@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock
 import pytest
 from app.models import JobState
-from app.zoom_integration import ZoomMeetingIntegrator
+from app.zoom_integration import ZoomMeetingIntegrator, ZoomRegistrationRequiredError
 
 
 @pytest.mark.asyncio
@@ -21,10 +21,23 @@ async def test_waiting_room_detection():
 
 @pytest.mark.asyncio
 async def test_registration_required_detection():
-    """Verify registration/auth required text triggers WAITING_FOR_AUTHORIZATION state."""
+    """Verify webinar/meeting registration triggers ZoomRegistrationRequiredError."""
     mock_page = MagicMock()
     mock_page.content = AsyncMock(
         return_value="<html><body><div>This meeting requires registration to join</div></body></html>"
+    )
+
+    integrator = ZoomMeetingIntegrator(mock_page)
+    with pytest.raises(ZoomRegistrationRequiredError):
+        await integrator.evaluate_meeting_state(max_wait_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_signin_required_detection():
+    """Verify sign in required text triggers WAITING_FOR_AUTHORIZATION state."""
+    mock_page = MagicMock()
+    mock_page.content = AsyncMock(
+        return_value="<html><body><div>Please sign in to join this meeting</div></body></html>"
     )
 
     integrator = ZoomMeetingIntegrator(mock_page)

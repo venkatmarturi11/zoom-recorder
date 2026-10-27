@@ -125,6 +125,12 @@ def validate_and_parse_zoom_url(
             meeting_id = qs["meeting_id"][0].strip()
 
     if not meeting_id or not MEETING_ID_PATTERN.match(meeting_id):
+        if "/webinar/register" in path or "/register" in path:
+            raise InvalidZoomURLError(
+                "This URL is a Zoom Webinar Registration page with Google reCAPTCHA. "
+                "Please complete registration on that page once to obtain your personal Attendee Join Link "
+                "(https://us06web.zoom.us/w/<meeting_id>?tk=...), then send that link to record directly!"
+            )
         raise InvalidZoomURLError("Could not locate a valid 9-to-11 digit Zoom Meeting ID in the provided URL.")
 
     # Parse passcode from query string (pwd=...) or explicit argument
